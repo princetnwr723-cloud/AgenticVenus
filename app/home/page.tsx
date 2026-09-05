@@ -17,10 +17,23 @@ import CodespacePanel from "@/components/CodespacePanel";
 import { getPrimaryConnection } from "@/lib/connections";
 import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
 import type { Provider } from "@/lib/providers";
-import { classifyAgent, type Agent } from "@/lib/agents";
-import { getBusinessDNA, buildBusinessContext, type BusinessDNA } from "@/lib/businessDNA";
-import { runDueTasks } from "@/lib/scheduler";
+import { classifyAgent, getAgentById, type Agent } from "@/lib/agents";
+import {
+  getBusinessDNA,
+  buildBusinessContext,
+  generateGreeting,
+  type BusinessDNA,
+} from "@/lib/businessDNA";
+import { runDueTasks, addScheduledTask, nextOccurrence } from "@/lib/scheduler";
+import { detectScheduleIntent } from "@/lib/scheduleDetect";
 import { extractCodeFiles } from "@/lib/codeExtract";
+import {
+  listChats,
+  createChat,
+  getChat,
+  saveChatMessages,
+  type ChatSummary,
+} from "@/lib/chats";
 
 export default function HomePage() {
   const { user, loading } = useAuth();
@@ -45,6 +58,14 @@ export default function HomePage() {
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
   const [classifying, setClassifying] = useState(false);
 
+  // Chat persistence
+  const [chats, setChats] = useState<ChatSummary[]>([]);
+  const [chatId, setChatId] = useState<string | null>(null);
+
+  // Personalized greeting
+  const [greeting, setGreeting] = useState<string | null>(null);
+  const [generatingGreeting, setGeneratingGreeting] = useState(false);
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -59,25 +80,40 @@ export default function HomePage() {
     }
   }, [loading, user, router]);
 
+  async function refreshChats() {
+    if (!user) return;
+    setChats(await listChats(user.uid));
+  }
+
   // Once we know who the user is: check for an existing connection (else
-  // force the model selector), and load their Business DNA if any.
+  // force the model selector), load their Business DNA, and load their
+  // saved chat list.
   useEffect(() => {
     if (!user) return;
     (async () => {
-      const [existing, dna] = await Promise.all([
-        getPrimaryConnection(user.uid),
-        getBusinessDNA(user.uid),
-      ]);
-      if (existing) {
-        setConnected(existing.provider);
-        setApiKey(existing.apiKey);
-      } else {
+      try {
+        const [existing, dna] = await Promise.all([
+          getPrimaryConnection(user.uid),
+          getBusinessDNA(user.uid),
+        ]);
+        if (existing) {
+          setConnected(existing.provider);
+          setApiKey(existing.apiKey);
+        } else {
+          setForceSelect(true);
+          setModalOpen(true);
+        }
+        setBusinessDNA(dna);
+        await refreshChats();
+      } catch (err) {
+        console.error("[home] failed to load workspace data:", err);
         setForceSelect(true);
         setModalOpen(true);
+      } finally {
+        setCheckingConnection(false);
       }
-      setBusinessDNA(dna);
-      setCheckingConnection(false);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   // Pick up a draft message typed on the landing page before signing up.
@@ -100,6 +136,19 @@ export default function HomePage() {
     }, 60_000);
     return () => clearInterval(interval);
   }, [user, connected, apiKey]);
+
+  // Generate a personalized greeting for a brand-new, empty chat when
+  // Business DNA is set — instead of a generic "how can I help".
+  useEffect(() => {
+    if (!connected || !apiKey || !businessDNA || messages.length > 0) return;
+    if (greeting || generatingGreeting) return;
+    setGeneratingGreeting(true);
+    generateGreeting(connected.id, apiKey, businessDNA).then((g) => {
+      setGreeting(g);
+      setGeneratingGreeting(false);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, apiKey, businessDNA, messages.length, chatId]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -124,13 +173,32 @@ export default function HomePage() {
     setError(null);
     setInput("");
     setActiveAgent(null);
+    setChatId(null);
+    setGreeting(null);
+  }
+
+  async function handleSelectChat(id: string) {
+    if (!user) return;
+    const chat = await getChat(user.uid, id);
+    if (!chat) return;
+    setChatId(chat.id);
+    setMessages(chat.messages);
+    setActiveAgent(chat.agentId ? getAgentById(chat.agentId) : null);
+    setGreeting(null);
+    setError(null);
+  }
+
+  async function persist(msgs: ChatMessage[], id: string, agentId?: string) {
+    if (!user) return;
+    await saveChatMessages(user.uid, id, msgs, agentId);
+    await refreshChats();
   }
 
   async function handleSend(e: FormEvent) {
     e.preventDefault();
     if (!input.trim()) return;
 
-    if (!connected || !apiKey) {
+    if (!connected || !apiKey || !user) {
       setForceSelect(true);
       setModalOpen(true);
       return;
@@ -142,6 +210,33 @@ export default function HomePage() {
     setMessages(nextMessages);
     setInput("");
     setError(null);
+    setGreeting(null);
+
+    // Create the chat doc lazily on the first message of a new chat.
+    let currentChatId = chatId;
+    if (!currentChatId) {
+      currentChatId = await createChat(user.uid, task);
+      setChatId(currentChatId);
+    }
+
+    // 0. Check if this is actually a scheduling request ("give me AI news
+    // daily at 10am") — if so, the boss agent sets it up in the Scheduler
+    // itself instead of answering once.
+    const intent = await detectScheduleIntent(connected.id, apiKey, task);
+    if (intent) {
+      const runAt = nextOccurrence(intent.time);
+      await addScheduledTask(user.uid, intent.taskMessage, runAt, intent.recurrence);
+      const confirmation: ChatMessage = {
+        role: "assistant",
+        content: `Done — I've scheduled "${intent.taskMessage}" to run ${
+          intent.recurrence === "daily" ? "every day" : "once"
+        } at ${intent.time}. You'll find it under Scheduler, and I'll drop the result there each time it runs.`,
+      };
+      const finalMessages = [...nextMessages, confirmation];
+      setMessages(finalMessages);
+      await persist(finalMessages, currentChatId, activeAgent?.id);
+      return;
+    }
 
     // 1. Boss agent decides which specialist should handle this task.
     setClassifying(true);
@@ -162,7 +257,9 @@ export default function HomePage() {
         messages: nextMessages,
         systemPrompt,
       });
-      setMessages([...nextMessages, { role: "assistant", content: reply }]);
+      const finalMessages = [...nextMessages, { role: "assistant" as const, content: reply }];
+      setMessages(finalMessages);
+      await persist(finalMessages, currentChatId, agent.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -177,7 +274,9 @@ export default function HomePage() {
       <Sidebar
         userLabel={user.email ?? user.displayName ?? "Account"}
         connected={connected}
-        hasMessages={messages.length > 0}
+        chats={chats}
+        activeChatId={chatId}
+        onSelectChat={handleSelectChat}
         onNewChat={handleNewChat}
         onSwitchModel={() => {
           setForceSelect(false);
@@ -218,11 +317,17 @@ export default function HomePage() {
                 <h1 className="font-serif text-3xl text-ink">
                   Welcome{user.displayName ? `, ${user.displayName}` : ""}
                 </h1>
-                <p className="mt-2 text-ink/55">
-                  {connected
-                    ? `Ask ${connected.name} anything to get started.`
-                    : "Connect a provider to start chatting."}
-                </p>
+                {generatingGreeting ? (
+                  <p className="mt-2 text-sm text-ink/40">Saying hello properly...</p>
+                ) : greeting ? (
+                  <p className="mx-auto mt-2 max-w-md text-ink/70">{greeting}</p>
+                ) : (
+                  <p className="mt-2 text-ink/55">
+                    {connected
+                      ? `Ask ${connected.name} anything to get started.`
+                      : "Connect a provider to start chatting."}
+                  </p>
+                )}
               </div>
             )}
 
@@ -306,7 +411,10 @@ export default function HomePage() {
         uid={user.uid}
         open={businessOpen}
         onClose={() => setBusinessOpen(false)}
-        onSaved={(dna) => setBusinessDNA(dna)}
+        onSaved={(dna) => {
+          setBusinessDNA(dna);
+          setGreeting(null);
+        }}
       />
       <CodespacePanel
         open={codespaceOpen}
