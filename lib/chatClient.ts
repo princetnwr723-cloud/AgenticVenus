@@ -20,69 +20,80 @@ type SendArgs = {
   providerId: string;
   apiKey: string;
   messages: ChatMessage[];
+  /** Optional system instructions — used to give the agent a persona
+   * (Agent Team) and/or business context (Business DNA). */
+  systemPrompt?: string;
 };
 
 export async function sendChatMessage({
   providerId,
   apiKey,
   messages,
+  systemPrompt,
 }: SendArgs): Promise<string> {
   try {
     switch (providerId) {
       case "anthropic":
-        return await callAnthropic(apiKey, messages);
+        return await callAnthropic(apiKey, messages, systemPrompt);
       case "google":
-        return await callGemini(apiKey, messages);
+        return await callGemini(apiKey, messages, systemPrompt);
       case "cohere":
-        return await callCohere(apiKey, messages);
+        return await callCohere(apiKey, messages, systemPrompt);
       case "openai":
         return await callOpenAiCompatible(
           "https://api.openai.com/v1/chat/completions",
           apiKey,
           messages,
-          "gpt-4o-mini"
+          "gpt-4o-mini",
+          systemPrompt
         );
       case "xai":
         return await callOpenAiCompatible(
           "https://api.x.ai/v1/chat/completions",
           apiKey,
           messages,
-          "grok-2-latest"
+          "grok-2-latest",
+          systemPrompt
         );
       case "openrouter":
         return await callOpenAiCompatible(
           "https://openrouter.ai/api/v1/chat/completions",
           apiKey,
           messages,
-          "openai/gpt-4o-mini"
+          "openai/gpt-4o-mini",
+          systemPrompt
         );
       case "mistral":
         return await callOpenAiCompatible(
           "https://api.mistral.ai/v1/chat/completions",
           apiKey,
           messages,
-          "mistral-small-latest"
+          "mistral-small-latest",
+          systemPrompt
         );
       case "groq":
         return await callOpenAiCompatible(
           "https://api.groq.com/openai/v1/chat/completions",
           apiKey,
           messages,
-          "llama-3.3-70b-versatile"
+          "llama-3.3-70b-versatile",
+          systemPrompt
         );
       case "deepseek":
         return await callOpenAiCompatible(
           "https://api.deepseek.com/chat/completions",
           apiKey,
           messages,
-          "deepseek-chat"
+          "deepseek-chat",
+          systemPrompt
         );
       case "perplexity":
         return await callOpenAiCompatible(
           "https://api.perplexity.ai/chat/completions",
           apiKey,
           messages,
-          "sonar"
+          "sonar",
+          systemPrompt
         );
       default:
         throw new Error("Unknown provider");
@@ -102,7 +113,11 @@ function friendlyError(err: unknown): string {
 }
 
 // ---------- Anthropic (Claude) ----------
-async function callAnthropic(apiKey: string, messages: ChatMessage[]) {
+async function callAnthropic(
+  apiKey: string,
+  messages: ChatMessage[],
+  systemPrompt?: string
+) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -114,6 +129,7 @@ async function callAnthropic(apiKey: string, messages: ChatMessage[]) {
     body: JSON.stringify({
       model: "claude-sonnet-4-5",
       max_tokens: 1024,
+      ...(systemPrompt ? { system: systemPrompt } : {}),
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
     }),
   });
@@ -122,7 +138,11 @@ async function callAnthropic(apiKey: string, messages: ChatMessage[]) {
 }
 
 // ---------- Google Gemini ----------
-async function callGemini(apiKey: string, messages: ChatMessage[]) {
+async function callGemini(
+  apiKey: string,
+  messages: ChatMessage[],
+  systemPrompt?: string
+) {
   const contents = messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
@@ -132,7 +152,12 @@ async function callGemini(apiKey: string, messages: ChatMessage[]) {
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ contents }),
+      body: JSON.stringify({
+        contents,
+        ...(systemPrompt
+          ? { systemInstruction: { parts: [{ text: systemPrompt }] } }
+          : {}),
+      }),
     }
   );
   const data = await parseOrThrow(res);
@@ -142,7 +167,14 @@ async function callGemini(apiKey: string, messages: ChatMessage[]) {
 }
 
 // ---------- Cohere ----------
-async function callCohere(apiKey: string, messages: ChatMessage[]) {
+async function callCohere(
+  apiKey: string,
+  messages: ChatMessage[],
+  systemPrompt?: string
+) {
+  const chatMessages = systemPrompt
+    ? [{ role: "system", content: systemPrompt }, ...messages]
+    : messages;
   const res = await fetch("https://api.cohere.com/v2/chat", {
     method: "POST",
     headers: {
@@ -151,7 +183,7 @@ async function callCohere(apiKey: string, messages: ChatMessage[]) {
     },
     body: JSON.stringify({
       model: "command-r",
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: chatMessages.map((m) => ({ role: m.role, content: m.content })),
     }),
   });
   const data = await parseOrThrow(res);
@@ -163,8 +195,12 @@ async function callOpenAiCompatible(
   url: string,
   apiKey: string,
   messages: ChatMessage[],
-  model: string
+  model: string,
+  systemPrompt?: string
 ) {
+  const chatMessages = systemPrompt
+    ? [{ role: "system", content: systemPrompt }, ...messages]
+    : messages;
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -173,7 +209,7 @@ async function callOpenAiCompatible(
     },
     body: JSON.stringify({
       model,
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: chatMessages.map((m) => ({ role: m.role, content: m.content })),
     }),
   });
   const data = await parseOrThrow(res);
