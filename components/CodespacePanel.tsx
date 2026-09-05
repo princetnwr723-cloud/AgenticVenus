@@ -3,11 +3,13 @@
 // components/CodespacePanel.tsx
 // A slide-over that shows the code the Developer Agent has produced so
 // far in this chat, extracted from its replies (see lib/codeExtract.ts).
-// Tabs mimic a lightweight file explorer/editor so the user can see what
-// the agent is "working on".
+// Includes a Copy button per file, and a live Preview tab that renders
+// the code — HTML/CSS/JS as a real page, JSX/TSX via a React+Babel CDN
+// shell — so it works for most web project types without a build step.
 
 import { useState } from "react";
 import type { CodeFile } from "@/lib/codeExtract";
+import { buildPreviewHtml } from "@/lib/preview";
 
 type Props = {
   open: boolean;
@@ -17,9 +19,24 @@ type Props = {
 
 export default function CodespacePanel({ open, onClose, files }: Props) {
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"code" | "preview">("code");
+  const [copied, setCopied] = useState(false);
+
   if (!open) return null;
 
   const active = files.find((f) => f.id === activeId) ?? files[files.length - 1];
+  const previewHtml = buildPreviewHtml(files);
+
+  async function handleCopy() {
+    if (!active) return;
+    try {
+      await navigator.clipboard.writeText(active.code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API can be blocked in some contexts — fail quietly.
+    }
+  }
 
   return (
     <div
@@ -35,13 +52,35 @@ export default function CodespacePanel({ open, onClose, files }: Props) {
             <span className="h-2 w-2 rounded-full bg-[#4D6BFE]" />
             <h2 className="text-sm font-medium">Codespace — Developer Agent</h2>
           </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="focus-ring rounded-md p-1 text-cream/60 hover:text-cream"
-          >
-            ✕
-          </button>
+          <div className="flex items-center gap-2">
+            {previewHtml && files.length > 0 && (
+              <div className="flex overflow-hidden rounded-md border border-white/15 text-xs">
+                <button
+                  onClick={() => setViewMode("code")}
+                  className={`px-3 py-1.5 transition-colors ${
+                    viewMode === "code" ? "bg-white/15 text-cream" : "text-cream/50 hover:bg-white/5"
+                  }`}
+                >
+                  Code
+                </button>
+                <button
+                  onClick={() => setViewMode("preview")}
+                  className={`px-3 py-1.5 transition-colors ${
+                    viewMode === "preview" ? "bg-white/15 text-cream" : "text-cream/50 hover:bg-white/5"
+                  }`}
+                >
+                  Preview
+                </button>
+              </div>
+            )}
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="focus-ring rounded-md p-1 text-cream/60 hover:text-cream"
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         {files.length === 0 ? (
@@ -49,6 +88,13 @@ export default function CodespacePanel({ open, onClose, files }: Props) {
             The Developer Agent hasn&apos;t written any code in this chat yet.
             Ask it to build something and files will show up here.
           </div>
+        ) : viewMode === "preview" && previewHtml ? (
+          <iframe
+            title="Codespace preview"
+            srcDoc={previewHtml}
+            sandbox="allow-scripts allow-modals allow-forms"
+            className="h-full w-full flex-1 border-0 bg-white"
+          />
         ) : (
           <div className="flex flex-1 overflow-hidden">
             <div className="w-48 shrink-0 overflow-y-auto border-r border-white/10 py-2">
@@ -67,12 +113,27 @@ export default function CodespacePanel({ open, onClose, files }: Props) {
               ))}
             </div>
             <div className="flex-1 overflow-auto p-5">
-              <p className="mb-3 text-xs text-cream/40">{active?.filename}</p>
+              <div className="mb-3 flex items-center justify-between">
+                <p className="text-xs text-cream/40">{active?.filename}</p>
+                <button
+                  onClick={handleCopy}
+                  className="focus-ring rounded-md border border-white/15 px-2.5 py-1 text-xs text-cream/70 transition-colors hover:bg-white/10 hover:text-cream"
+                >
+                  {copied ? "Copied ✓" : "Copy"}
+                </button>
+              </div>
               <pre className="animate-fade-in whitespace-pre-wrap break-words font-mono text-[13px] leading-relaxed text-cream/90">
                 {active?.code}
               </pre>
             </div>
           </div>
+        )}
+
+        {files.length > 0 && !previewHtml && viewMode === "code" && (
+          <p className="border-t border-white/10 px-5 py-2 text-xs text-cream/35">
+            No live preview available for this file type yet — preview works
+            for HTML/CSS/JS and React (JSX/TSX) projects.
+          </p>
         )}
       </div>
     </div>
