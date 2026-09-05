@@ -52,7 +52,7 @@ export async function sendChatMessage({
           "https://api.x.ai/v1/chat/completions",
           apiKey,
           messages,
-          "grok-2-latest",
+          "grok-4.6",
           systemPrompt
         );
       case "openrouter":
@@ -127,7 +127,7 @@ async function callAnthropic(
       "anthropic-dangerous-direct-browser-access": "true",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5",
       max_tokens: 1024,
       ...(systemPrompt ? { system: systemPrompt } : {}),
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
@@ -148,7 +148,7 @@ async function callGemini(
     parts: [{ text: m.content }],
   }));
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
