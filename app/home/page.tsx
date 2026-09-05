@@ -14,7 +14,14 @@ import MCPPanel from "@/components/MCPPanel";
 import BusinessDNAPanel from "@/components/BusinessDNAPanel";
 import AgentTeamPanel from "@/components/AgentTeamPanel";
 import CodespacePanel from "@/components/CodespacePanel";
-import { getPrimaryConnection } from "@/lib/connections";
+import ModelDropdown from "@/components/ModelDropdown";
+import SettingsPanel from "@/components/SettingsPanel";
+import {
+  getPrimaryConnection,
+  getAllConnections,
+  updateConnectionModel,
+  type SavedConnection,
+} from "@/lib/connections";
 import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
 import type { Provider } from "@/lib/providers";
 import { classifyAgent, getAgentById, type Agent } from "@/lib/agents";
@@ -40,8 +47,10 @@ export default function HomePage() {
   const router = useRouter();
 
   const [checkingConnection, setCheckingConnection] = useState(true);
-  const [connected, setConnected] = useState<Provider | null>(null);
+  const [connected, setConnected] = useState<Provider | null>(null); // sidebar default
   const [apiKey, setApiKey] = useState<string | null>(null);
+  const [connections, setConnections] = useState<SavedConnection[]>([]);
+  const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
   const [businessDNA, setBusinessDNA] = useState<BusinessDNA | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -53,6 +62,7 @@ export default function HomePage() {
   const [mcpOpen, setMcpOpen] = useState(false);
   const [businessOpen, setBusinessOpen] = useState(false);
   const [codespaceOpen, setCodespaceOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Agent Team
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
@@ -73,7 +83,12 @@ export default function HomePage() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Redirect unauthenticated visitors to log in.
+  // The connection actually used to send messages in THIS conversation —
+  // falls back to the sidebar default if nothing chat-specific is set.
+  const activeConnection: SavedConnection | null =
+    connections.find((c) => c.provider.id === activeProviderId) ??
+    (connected && apiKey ? { provider: connected, apiKey } : null);
+
   useEffect(() => {
     if (!loading && !user) {
       router.push("/login");
@@ -85,20 +100,25 @@ export default function HomePage() {
     setChats(await listChats(user.uid));
   }
 
-  // Once we know who the user is: check for an existing connection (else
-  // force the model selector), load their Business DNA, and load their
-  // saved chat list.
+  async function refreshConnections() {
+    if (!user) return;
+    setConnections(await getAllConnections(user.uid));
+  }
+
   useEffect(() => {
     if (!user) return;
     (async () => {
       try {
-        const [existing, dna] = await Promise.all([
+        const [existing, allConns, dna] = await Promise.all([
           getPrimaryConnection(user.uid),
+          getAllConnections(user.uid),
           getBusinessDNA(user.uid),
         ]);
+        setConnections(allConns);
         if (existing) {
           setConnected(existing.provider);
           setApiKey(existing.apiKey);
+          setActiveProviderId(existing.provider.id);
         } else {
           setForceSelect(true);
           setModalOpen(true);
@@ -116,7 +136,6 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
-  // Pick up a draft message typed on the landing page before signing up.
   useEffect(() => {
     const draft = sessionStorage.getItem("agenticvenus_draft");
     if (draft) {
@@ -125,9 +144,6 @@ export default function HomePage() {
     }
   }, []);
 
-  // Run any due scheduled tasks while the workspace is open, and re-check
-  // periodically. This is a client-side stand-in for a real cron job —
-  // see lib/scheduler.ts.
   useEffect(() => {
     if (!user || !connected || !apiKey) return;
     runDueTasks(user.uid, connected.id, apiKey);
@@ -137,18 +153,21 @@ export default function HomePage() {
     return () => clearInterval(interval);
   }, [user, connected, apiKey]);
 
-  // Generate a personalized greeting for a brand-new, empty chat when
-  // Business DNA is set — instead of a generic "how can I help".
   useEffect(() => {
-    if (!connected || !apiKey || !businessDNA || messages.length > 0) return;
+    if (!activeConnection || !businessDNA || messages.length > 0) return;
     if (greeting || generatingGreeting) return;
     setGeneratingGreeting(true);
-    generateGreeting(connected.id, apiKey, businessDNA).then((g) => {
+    generateGreeting(
+      activeConnection.provider.id,
+      activeConnection.apiKey,
+      businessDNA,
+      activeConnection.model
+    ).then((g) => {
       setGreeting(g);
       setGeneratingGreeting(false);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connected, apiKey, businessDNA, messages.length, chatId]);
+  }, [activeConnection?.provider.id, businessDNA, messages.length, chatId]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -163,8 +182,15 @@ export default function HomePage() {
   }
 
   function handleConnected(provider: Provider, key: string) {
-    setConnected(provider);
-    setApiKey(key);
+    setConnections((prev) => {
+      const others = prev.filter((c) => c.provider.id !== provider.id);
+      return [...others, { provider, apiKey: key }];
+    });
+    if (!connected) {
+      setConnected(provider);
+      setApiKey(key);
+    }
+    setActiveProviderId(provider.id);
     setForceSelect(false);
   }
 
@@ -175,6 +201,7 @@ export default function HomePage() {
     setActiveAgent(null);
     setChatId(null);
     setGreeting(null);
+    setActiveProviderId(connected?.id ?? null);
   }
 
   async function handleSelectChat(id: string) {
@@ -184,26 +211,43 @@ export default function HomePage() {
     setChatId(chat.id);
     setMessages(chat.messages);
     setActiveAgent(chat.agentId ? getAgentById(chat.agentId) : null);
+    setActiveProviderId(chat.providerId ?? connected?.id ?? null);
     setGreeting(null);
     setError(null);
   }
 
-  async function persist(msgs: ChatMessage[], id: string, agentId?: string) {
+  async function persist(msgs: ChatMessage[], id: string, agentId?: string, providerId?: string) {
     if (!user) return;
-    await saveChatMessages(user.uid, id, msgs, agentId);
+    await saveChatMessages(user.uid, id, msgs, agentId, providerId);
     await refreshChats();
+  }
+
+  function handleSelectProviderForChat(providerId: string) {
+    setActiveProviderId(providerId);
+    if (user && chatId) {
+      saveChatMessages(user.uid, chatId, messages, activeAgent?.id, providerId);
+    }
+  }
+
+  async function handleModelChange(model: string) {
+    if (!user || !activeConnection) return;
+    await updateConnectionModel(user.uid, activeConnection.provider.id, model);
+    setConnections((prev) =>
+      prev.map((c) => (c.provider.id === activeConnection.provider.id ? { ...c, model } : c))
+    );
   }
 
   async function handleSend(e: FormEvent) {
     e.preventDefault();
     if (!input.trim()) return;
 
-    if (!connected || !apiKey || !user) {
+    if (!activeConnection || !user) {
       setForceSelect(true);
       setModalOpen(true);
       return;
     }
 
+    const { provider, apiKey: activeKey, model } = activeConnection;
     const task = input.trim();
     const userMessage: ChatMessage = { role: "user", content: task };
     const nextMessages = [...messages, userMessage];
@@ -212,17 +256,15 @@ export default function HomePage() {
     setError(null);
     setGreeting(null);
 
-    // Create the chat doc lazily on the first message of a new chat.
     let currentChatId = chatId;
     if (!currentChatId) {
       currentChatId = await createChat(user.uid, task);
       setChatId(currentChatId);
     }
 
-    // 0. Check if this is actually a scheduling request ("give me AI news
-    // daily at 10am") — if so, the boss agent sets it up in the Scheduler
-    // itself instead of answering once.
-    const intent = await detectScheduleIntent(connected.id, apiKey, task);
+    // 0. Check if this is a scheduling request ("give me AI news daily at
+    // 10am") — if so, the boss agent sets it up in the Scheduler itself.
+    const intent = await detectScheduleIntent(provider.id, activeKey, task, model);
     if (intent) {
       const runAt = nextOccurrence(intent.time);
       await addScheduledTask(user.uid, intent.taskMessage, runAt, intent.recurrence);
@@ -234,13 +276,13 @@ export default function HomePage() {
       };
       const finalMessages = [...nextMessages, confirmation];
       setMessages(finalMessages);
-      await persist(finalMessages, currentChatId, activeAgent?.id);
+      await persist(finalMessages, currentChatId, activeAgent?.id, provider.id);
       return;
     }
 
     // 1. Boss agent decides which specialist should handle this task.
     setClassifying(true);
-    const agent = await classifyAgent(connected.id, apiKey, task);
+    const agent = await classifyAgent(provider.id, activeKey, task, model);
     setActiveAgent(agent);
     setClassifying(false);
 
@@ -252,14 +294,15 @@ export default function HomePage() {
 
     try {
       const reply = await sendChatMessage({
-        providerId: connected.id,
-        apiKey,
+        providerId: provider.id,
+        apiKey: activeKey,
         messages: nextMessages,
         systemPrompt,
+        model,
       });
       const finalMessages = [...nextMessages, { role: "assistant" as const, content: reply }];
       setMessages(finalMessages);
-      await persist(finalMessages, currentChatId, agent.id);
+      await persist(finalMessages, currentChatId, agent.id, provider.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -293,9 +336,17 @@ export default function HomePage() {
         {/* Top bar */}
         <div className="flex items-center justify-between border-b border-black/5 px-6 py-3">
           <span className="text-sm font-medium text-ink/70">
-            {connected ? `Chatting with ${connected.name}` : "Workspace"}
+            {activeConnection ? `Chatting with ${activeConnection.provider.name}` : "Workspace"}
           </span>
           <div className="flex items-center gap-2">
+            {activeConnection && (
+              <ModelDropdown
+                provider={activeConnection.provider}
+                apiKey={activeConnection.apiKey}
+                selectedModel={activeConnection.model ?? null}
+                onChange={handleModelChange}
+              />
+            )}
             <AgentTeamPanel activeAgent={activeAgent} classifying={classifying} />
             {activeAgent?.isDeveloper && (
               <button
@@ -306,6 +357,21 @@ export default function HomePage() {
                 Codespace
               </button>
             )}
+            <button
+              onClick={() => setSettingsOpen(true)}
+              aria-label="Settings"
+              className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <circle cx="7" cy="7" r="1.8" stroke="currentColor" strokeWidth="1.2" />
+                <path
+                  d="M7 1.5v1.3M7 11.2v1.3M2.5 7H1.2M12.8 7h-1.3M3.6 3.6l.9.9M9.5 9.5l.9.9M10.4 3.6l-.9.9M4.5 9.5l-.9.9"
+                  stroke="currentColor"
+                  strokeWidth="1.1"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
           </div>
         </div>
 
@@ -323,8 +389,8 @@ export default function HomePage() {
                   <p className="mx-auto mt-2 max-w-md text-ink/70">{greeting}</p>
                 ) : (
                   <p className="mt-2 text-ink/55">
-                    {connected
-                      ? `Ask ${connected.name} anything to get started.`
+                    {activeConnection
+                      ? `Ask ${activeConnection.provider.name} anything to get started.`
                       : "Connect a provider to start chatting."}
                   </p>
                 )}
@@ -367,8 +433,8 @@ export default function HomePage() {
               }}
               rows={1}
               placeholder={
-                connected
-                  ? `Message ${connected.name}...`
+                activeConnection
+                  ? `Message ${activeConnection.provider.name}...`
                   : "Connect a provider to start chatting..."
               }
               className="max-h-40 flex-1 resize-none bg-transparent px-2 py-2 text-[15px] text-ink outline-none placeholder:text-ink/40"
@@ -386,7 +452,7 @@ export default function HomePage() {
           </form>
           <p className="mx-auto mt-2 max-w-3xl text-center text-xs text-ink/35">
             AgenticVenus uses your own API key — responses come directly
-            from {connected ? connected.name : "your chosen provider"}.
+            from {activeConnection ? activeConnection.provider.name : "your chosen provider"}.
           </p>
         </div>
       </section>
@@ -420,6 +486,18 @@ export default function HomePage() {
         open={codespaceOpen}
         onClose={() => setCodespaceOpen(false)}
         files={codeFiles}
+      />
+      <SettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        connections={connections}
+        activeProviderId={activeConnection?.provider.id ?? null}
+        onSelectProvider={handleSelectProviderForChat}
+        onConnectAnother={() => {
+          setForceSelect(false);
+          setSettingsOpen(false);
+          setModalOpen(true);
+        }}
       />
     </main>
   );
