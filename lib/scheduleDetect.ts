@@ -21,7 +21,8 @@ function extractJson(text: string): string {
 export async function detectScheduleIntent(
   providerId: string,
   apiKey: string,
-  userMessage: string
+  userMessage: string,
+  model?: string
 ): Promise<ScheduleIntent | null> {
   const prompt = `Decide if this message is asking to schedule something for a future/recurring time (e.g. "send me AI news daily at 10am", "remind me to check email every morning at 9", "email me a summary tomorrow at 6pm").
 
@@ -37,6 +38,7 @@ If it is not a scheduling request, reply {"isSchedule": false, "taskMessage": ""
       providerId,
       apiKey,
       messages: [{ role: "user", content: prompt }],
+      model,
     });
     const parsed = JSON.parse(extractJson(reply));
     if (!parsed?.isSchedule || !parsed?.time) return null;
