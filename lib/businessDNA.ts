@@ -5,6 +5,7 @@
 
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { sendChatMessage } from "@/lib/chatClient";
 
 export type BusinessDNA = {
   businessName: string;
@@ -55,4 +56,28 @@ export function buildBusinessContext(dna: BusinessDNA | null): string {
     "Always answer as this business would — represent it accurately and never invent facts about it that weren't given to you."
   );
   return parts.join("\n");
+}
+
+/** Generates a short, warm, personalized greeting for a brand-new chat —
+ * written as if the agent already knows the user and their business,
+ * instead of a generic "How can I help?". Falls back to null on any
+ * failure so the UI can show its default welcome text instead. */
+export async function generateGreeting(
+  providerId: string,
+  apiKey: string,
+  dna: BusinessDNA
+): Promise<string | null> {
+  const context = buildBusinessContext(dna);
+  const prompt = `${context}\n\nWrite ONE short, warm greeting (max 2 sentences) to open a new conversation with the business owner. Greet them like a colleague who already knows the business well — reference something specific about it (not generic). Don't ask "how can I help" as a throwaway line, make it feel personal. Reply with just the greeting text, nothing else.`;
+
+  try {
+    const reply = await sendChatMessage({
+      providerId,
+      apiKey,
+      messages: [{ role: "user", content: prompt }],
+    });
+    return reply.trim();
+  } catch {
+    return null;
+  }
 }
