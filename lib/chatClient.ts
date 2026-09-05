@@ -1,7 +1,11 @@
 // lib/chatClient.ts
 // Sends a conversation to whichever provider the user connected, using
 // their own API key. Each provider has a slightly different request/
-// response shape, so this file normalizes them into one function.
+// response shape, so this file normalizes them into one function. An
+// optional `model` override lets the caller use whichever model the user
+// picked from the live model list (see lib/modelList.ts) instead of the
+// hardcoded default — that's what prevents "model not found" errors as
+// providers retire/rename models over time.
 //
 // IMPORTANT: these calls run directly from the browser. Some providers
 // (OpenAI, Google, etc.) don't send CORS headers that allow browser-side
@@ -23,6 +27,8 @@ type SendArgs = {
   /** Optional system instructions — used to give the agent a persona
    * (Agent Team) and/or business context (Business DNA). */
   systemPrompt?: string;
+  /** Optional specific model id to use instead of the provider's default. */
+  model?: string;
 };
 
 export async function sendChatMessage({
@@ -30,21 +36,22 @@ export async function sendChatMessage({
   apiKey,
   messages,
   systemPrompt,
+  model,
 }: SendArgs): Promise<string> {
   try {
     switch (providerId) {
       case "anthropic":
-        return await callAnthropic(apiKey, messages, systemPrompt);
+        return await callAnthropic(apiKey, messages, systemPrompt, model);
       case "google":
-        return await callGemini(apiKey, messages, systemPrompt);
+        return await callGemini(apiKey, messages, systemPrompt, model);
       case "cohere":
-        return await callCohere(apiKey, messages, systemPrompt);
+        return await callCohere(apiKey, messages, systemPrompt, model);
       case "openai":
         return await callOpenAiCompatible(
           "https://api.openai.com/v1/chat/completions",
           apiKey,
           messages,
-          "gpt-4o-mini",
+          model || "gpt-4o-mini",
           systemPrompt
         );
       case "xai":
@@ -52,7 +59,7 @@ export async function sendChatMessage({
           "https://api.x.ai/v1/chat/completions",
           apiKey,
           messages,
-          "grok-4.6",
+          model || "grok-4.6",
           systemPrompt
         );
       case "openrouter":
@@ -60,7 +67,7 @@ export async function sendChatMessage({
           "https://openrouter.ai/api/v1/chat/completions",
           apiKey,
           messages,
-          "openai/gpt-4o-mini",
+          model || "openai/gpt-4o-mini",
           systemPrompt
         );
       case "mistral":
@@ -68,7 +75,7 @@ export async function sendChatMessage({
           "https://api.mistral.ai/v1/chat/completions",
           apiKey,
           messages,
-          "mistral-small-latest",
+          model || "mistral-small-latest",
           systemPrompt
         );
       case "groq":
@@ -76,7 +83,7 @@ export async function sendChatMessage({
           "https://api.groq.com/openai/v1/chat/completions",
           apiKey,
           messages,
-          "llama-3.3-70b-versatile",
+          model || "llama-3.3-70b-versatile",
           systemPrompt
         );
       case "deepseek":
@@ -84,7 +91,7 @@ export async function sendChatMessage({
           "https://api.deepseek.com/chat/completions",
           apiKey,
           messages,
-          "deepseek-chat",
+          model || "deepseek-chat",
           systemPrompt
         );
       case "perplexity":
@@ -92,7 +99,7 @@ export async function sendChatMessage({
           "https://api.perplexity.ai/chat/completions",
           apiKey,
           messages,
-          "sonar",
+          model || "sonar",
           systemPrompt
         );
       default:
@@ -106,7 +113,6 @@ export async function sendChatMessage({
 
 function friendlyError(err: unknown): string {
   if (err instanceof TypeError) {
-    // Most browser CORS/network failures surface as a generic TypeError.
     return "Couldn't reach this provider from the browser. Some providers block direct browser requests (CORS) — for production, proxy this call through a small server route. Check the browser console for details.";
   }
   return err instanceof Error ? err.message : "Something went wrong.";
@@ -116,7 +122,8 @@ function friendlyError(err: unknown): string {
 async function callAnthropic(
   apiKey: string,
   messages: ChatMessage[],
-  systemPrompt?: string
+  systemPrompt?: string,
+  model?: string
 ) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -127,7 +134,7 @@ async function callAnthropic(
       "anthropic-dangerous-direct-browser-access": "true",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-5",
+      model: model || "claude-sonnet-5",
       max_tokens: 1024,
       ...(systemPrompt ? { system: systemPrompt } : {}),
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
@@ -141,7 +148,8 @@ async function callAnthropic(
 async function callGemini(
   apiKey: string,
   messages: ChatMessage[],
-  systemPrompt?: string
+  systemPrompt?: string,
+  model?: string
 ) {
   const contents = messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
@@ -154,19 +162,18 @@ async function callGemini(
       : {}),
   });
 
-  const tryModel = async (model: string) => {
+  const tryModel = async (m: string) => {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`,
       { method: "POST", headers: { "content-type": "application/json" }, body }
     );
     return { res, data: await res.json().catch(() => null) };
   };
 
-  // Google retires/renames Gemini models often, so if our hardcoded guess
-  // is stale, fall back to asking the API which model to use instead of
-  // failing outright.
-  let { res, data } = await tryModel("gemini-3.6-flash");
+  let { res, data } = await tryModel(model || "gemini-3.6-flash");
 
+  // Google retires/renames Gemini models often — if our model guess is
+  // stale, fall back to asking the API which model to use.
   if (!res.ok && (data?.error?.message || "").toLowerCase().includes("no longer available")) {
     const listRes = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
@@ -195,7 +202,8 @@ async function callGemini(
 async function callCohere(
   apiKey: string,
   messages: ChatMessage[],
-  systemPrompt?: string
+  systemPrompt?: string,
+  model?: string
 ) {
   const chatMessages = systemPrompt
     ? [{ role: "system", content: systemPrompt }, ...messages]
@@ -207,7 +215,7 @@ async function callCohere(
       authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "command-r",
+      model: model || "command-r",
       messages: chatMessages.map((m) => ({ role: m.role, content: m.content })),
     }),
   });
