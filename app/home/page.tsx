@@ -8,9 +8,19 @@ import { useAuth } from "@/components/AuthProvider";
 import ModelSelectorModal from "@/components/ModelSelectorModal";
 import Sidebar from "@/components/Sidebar";
 import { ChatMessageItem, TypingIndicator } from "@/components/ChatMessage";
+import SchedulerPanel from "@/components/SchedulerPanel";
+import PluginsPanel from "@/components/PluginsPanel";
+import MCPPanel from "@/components/MCPPanel";
+import BusinessDNAPanel from "@/components/BusinessDNAPanel";
+import AgentTeamPanel from "@/components/AgentTeamPanel";
+import CodespacePanel from "@/components/CodespacePanel";
 import { getPrimaryConnection } from "@/lib/connections";
 import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
 import type { Provider } from "@/lib/providers";
+import { classifyAgent, type Agent } from "@/lib/agents";
+import { getBusinessDNA, buildBusinessContext, type BusinessDNA } from "@/lib/businessDNA";
+import { runDueTasks } from "@/lib/scheduler";
+import { extractCodeFiles } from "@/lib/codeExtract";
 
 export default function HomePage() {
   const { user, loading } = useAuth();
@@ -19,9 +29,21 @@ export default function HomePage() {
   const [checkingConnection, setCheckingConnection] = useState(true);
   const [connected, setConnected] = useState<Provider | null>(null);
   const [apiKey, setApiKey] = useState<string | null>(null);
+  const [businessDNA, setBusinessDNA] = useState<BusinessDNA | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [forceSelect, setForceSelect] = useState(false);
+
+  // Feature panels
+  const [schedulerOpen, setSchedulerOpen] = useState(false);
+  const [pluginsOpen, setPluginsOpen] = useState(false);
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [businessOpen, setBusinessOpen] = useState(false);
+  const [codespaceOpen, setCodespaceOpen] = useState(false);
+
+  // Agent Team
+  const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
+  const [classifying, setClassifying] = useState(false);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -37,12 +59,15 @@ export default function HomePage() {
     }
   }, [loading, user, router]);
 
-  // Once we know who the user is, check whether they've already connected
-  // a provider. If not, this is their first visit — force the selector.
+  // Once we know who the user is: check for an existing connection (else
+  // force the model selector), and load their Business DNA if any.
   useEffect(() => {
     if (!user) return;
     (async () => {
-      const existing = await getPrimaryConnection(user.uid);
+      const [existing, dna] = await Promise.all([
+        getPrimaryConnection(user.uid),
+        getBusinessDNA(user.uid),
+      ]);
       if (existing) {
         setConnected(existing.provider);
         setApiKey(existing.apiKey);
@@ -50,6 +75,7 @@ export default function HomePage() {
         setForceSelect(true);
         setModalOpen(true);
       }
+      setBusinessDNA(dna);
       setCheckingConnection(false);
     })();
   }, [user]);
@@ -62,6 +88,18 @@ export default function HomePage() {
       sessionStorage.removeItem("agenticvenus_draft");
     }
   }, []);
+
+  // Run any due scheduled tasks while the workspace is open, and re-check
+  // periodically. This is a client-side stand-in for a real cron job —
+  // see lib/scheduler.ts.
+  useEffect(() => {
+    if (!user || !connected || !apiKey) return;
+    runDueTasks(user.uid, connected.id, apiKey);
+    const interval = setInterval(() => {
+      runDueTasks(user.uid, connected.id, apiKey);
+    }, 60_000);
+    return () => clearInterval(interval);
+  }, [user, connected, apiKey]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -85,6 +123,7 @@ export default function HomePage() {
     setMessages([]);
     setError(null);
     setInput("");
+    setActiveAgent(null);
   }
 
   async function handleSend(e: FormEvent) {
@@ -97,18 +136,31 @@ export default function HomePage() {
       return;
     }
 
-    const userMessage: ChatMessage = { role: "user", content: input.trim() };
+    const task = input.trim();
+    const userMessage: ChatMessage = { role: "user", content: task };
     const nextMessages = [...messages, userMessage];
     setMessages(nextMessages);
     setInput("");
-    setSending(true);
     setError(null);
+
+    // 1. Boss agent decides which specialist should handle this task.
+    setClassifying(true);
+    const agent = await classifyAgent(connected.id, apiKey, task);
+    setActiveAgent(agent);
+    setClassifying(false);
+
+    // 2. The chosen specialist (with Business DNA layered in) answers for real.
+    setSending(true);
+    const systemPrompt = [agent.systemPrompt, buildBusinessContext(businessDNA)]
+      .filter(Boolean)
+      .join("\n\n");
 
     try {
       const reply = await sendChatMessage({
         providerId: connected.id,
         apiKey,
         messages: nextMessages,
+        systemPrompt,
       });
       setMessages([...nextMessages, { role: "assistant", content: reply }]);
     } catch (err) {
@@ -117,6 +169,8 @@ export default function HomePage() {
       setSending(false);
     }
   }
+
+  const codeFiles = extractCodeFiles(messages);
 
   return (
     <main className="flex h-screen overflow-hidden bg-cream">
@@ -129,6 +183,10 @@ export default function HomePage() {
           setForceSelect(false);
           setModalOpen(true);
         }}
+        onOpenScheduler={() => setSchedulerOpen(true)}
+        onOpenPlugins={() => setPluginsOpen(true)}
+        onOpenMCP={() => setMcpOpen(true)}
+        onOpenBusinessDNA={() => setBusinessOpen(true)}
         onLogout={() => signOut(auth)}
       />
 
@@ -138,6 +196,18 @@ export default function HomePage() {
           <span className="text-sm font-medium text-ink/70">
             {connected ? `Chatting with ${connected.name}` : "Workspace"}
           </span>
+          <div className="flex items-center gap-2">
+            <AgentTeamPanel activeAgent={activeAgent} classifying={classifying} />
+            {activeAgent?.isDeveloper && (
+              <button
+                onClick={() => setCodespaceOpen(true)}
+                className="focus-ring flex items-center gap-2 rounded-md border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink/80 transition-all hover:-translate-y-0.5 hover:shadow-sm"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-[#4D6BFE]" />
+                Codespace
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Messages */}
@@ -160,6 +230,11 @@ export default function HomePage() {
               <ChatMessageItem key={i} message={m} />
             ))}
 
+            {classifying && (
+              <p className="animate-fade-in text-xs text-ink/40">
+                The boss agent is choosing the right specialist for this task...
+              </p>
+            )}
             {sending && <TypingIndicator />}
 
             {error && (
@@ -200,13 +275,7 @@ export default function HomePage() {
               className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-cream transition-all hover:scale-105 disabled:cursor-not-allowed disabled:opacity-30"
             >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                <path
-                  d="M2 7h10M7 2l5 5-5 5"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
+                <path d="M2 7h10M7 2l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </button>
           </form>
@@ -223,6 +292,26 @@ export default function HomePage() {
         forceSelect={forceSelect}
         onClose={() => setModalOpen(false)}
         onConnected={handleConnected}
+      />
+
+      <SchedulerPanel
+        uid={user.uid}
+        open={schedulerOpen}
+        onClose={() => setSchedulerOpen(false)}
+        hasConnection={!!connected}
+      />
+      <PluginsPanel open={pluginsOpen} onClose={() => setPluginsOpen(false)} />
+      <MCPPanel uid={user.uid} open={mcpOpen} onClose={() => setMcpOpen(false)} />
+      <BusinessDNAPanel
+        uid={user.uid}
+        open={businessOpen}
+        onClose={() => setBusinessOpen(false)}
+        onSaved={(dna) => setBusinessDNA(dna)}
+      />
+      <CodespacePanel
+        open={codespaceOpen}
+        onClose={() => setCodespaceOpen(false)}
+        files={codeFiles}
       />
     </main>
   );
