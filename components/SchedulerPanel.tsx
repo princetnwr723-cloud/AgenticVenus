@@ -12,6 +12,7 @@ import {
   deleteScheduledTask,
   listScheduledTasks,
   type ScheduledTask,
+  type Recurrence,
 } from "@/lib/scheduler";
 
 type Props = {
@@ -25,6 +26,7 @@ export default function SchedulerPanel({ uid, open, onClose, hasConnection }: Pr
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [message, setMessage] = useState("");
   const [when, setWhen] = useState("");
+  const [recurrence, setRecurrence] = useState<Recurrence>("once");
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
@@ -42,9 +44,10 @@ export default function SchedulerPanel({ uid, open, onClose, hasConnection }: Pr
   async function handleAdd() {
     if (!message.trim() || !when) return;
     setSubmitting(true);
-    await addScheduledTask(uid, message.trim(), new Date(when));
+    await addScheduledTask(uid, message.trim(), new Date(when), recurrence);
     setMessage("");
     setWhen("");
+    setRecurrence("once");
     await refresh();
     setSubmitting(false);
   }
@@ -82,6 +85,22 @@ export default function SchedulerPanel({ uid, open, onClose, hasConnection }: Pr
           onChange={(e) => setWhen(e.target.value)}
           className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
         />
+        <div className="flex gap-2">
+          {(["once", "daily"] as Recurrence[]).map((r) => (
+            <button
+              key={r}
+              type="button"
+              onClick={() => setRecurrence(r)}
+              className={`flex-1 rounded-md border px-3 py-2 text-sm capitalize transition-colors ${
+                recurrence === r
+                  ? "border-clay bg-clay/10 text-clay"
+                  : "border-ink/15 bg-white text-ink/60 hover:bg-sand"
+              }`}
+            >
+              {r}
+            </button>
+          ))}
+        </div>
         <button
           onClick={handleAdd}
           disabled={!message.trim() || !when || submitting}
@@ -118,6 +137,11 @@ export default function SchedulerPanel({ uid, open, onClose, hasConnection }: Pr
                 <div className="mt-1 flex items-center gap-2 text-xs text-ink/45">
                   <span>{t.runAt.toDate().toLocaleString()}</span>
                   <StatusBadge status={t.status} />
+                  {t.recurrence === "daily" && (
+                    <span className="rounded-full bg-moss/15 px-2 py-0.5 text-[10px] font-medium text-moss">
+                      daily
+                    </span>
+                  )}
                 </div>
                 {t.resultText && (
                   <p className="mt-2 whitespace-pre-wrap rounded-md bg-sand px-2.5 py-2 text-xs text-ink/75">
