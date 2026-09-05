@@ -147,20 +147,45 @@ async function callGemini(
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   }));
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        contents,
-        ...(systemPrompt
-          ? { systemInstruction: { parts: [{ text: systemPrompt }] } }
-          : {}),
-      }),
+  const body = JSON.stringify({
+    contents,
+    ...(systemPrompt
+      ? { systemInstruction: { parts: [{ text: systemPrompt }] } }
+      : {}),
+  });
+
+  const tryModel = async (model: string) => {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      { method: "POST", headers: { "content-type": "application/json" }, body }
+    );
+    return { res, data: await res.json().catch(() => null) };
+  };
+
+  // Google retires/renames Gemini models often, so if our hardcoded guess
+  // is stale, fall back to asking the API which model to use instead of
+  // failing outright.
+  let { res, data } = await tryModel("gemini-3.6-flash");
+
+  if (!res.ok && (data?.error?.message || "").toLowerCase().includes("no longer available")) {
+    const listRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
+    );
+    const listData = await listRes.json().catch(() => null);
+    const candidate = listData?.models?.find(
+      (m: any) =>
+        m.supportedGenerationMethods?.includes("generateContent") &&
+        /flash/i.test(m.name)
+    );
+    if (candidate) {
+      const modelId = candidate.name.replace("models/", "");
+      ({ res, data } = await tryModel(modelId));
     }
-  );
-  const data = await parseOrThrow(res);
+  }
+
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Request failed (${res.status})`);
+  }
   return (
     data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "(empty response)"
   );
