@@ -6,6 +6,7 @@
 // status pinned to the bottom.
 
 import type { Provider } from "@/lib/providers";
+import type { ChatSummary } from "@/lib/chats";
 
 type Props = {
   userLabel: string;
@@ -17,7 +18,9 @@ type Props = {
   onOpenMCP: () => void;
   onOpenBusinessDNA: () => void;
   onLogout: () => void;
-  hasMessages: boolean;
+  chats: ChatSummary[];
+  activeChatId: string | null;
+  onSelectChat: (chatId: string) => void;
 };
 
 export default function Sidebar({
@@ -30,7 +33,9 @@ export default function Sidebar({
   onOpenMCP,
   onOpenBusinessDNA,
   onLogout,
-  hasMessages,
+  chats,
+  activeChatId,
+  onSelectChat,
 }: Props) {
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col border-r border-black/5 bg-cream-dark/60">
@@ -65,15 +70,25 @@ export default function Sidebar({
         <p className="px-2 text-xs font-medium uppercase tracking-wide text-ink/35">
           Chats
         </p>
-        <div className="mt-2">
-          {hasMessages ? (
-            <div className="rounded-md bg-sand px-3 py-2 text-sm text-ink/80">
-              Current chat
-            </div>
-          ) : (
+        <div className="mt-2 space-y-0.5">
+          {chats.length === 0 ? (
             <p className="px-2 py-2 text-sm text-ink/40">
               Your conversations will show up here.
             </p>
+          ) : (
+            chats.map((chat) => (
+              <button
+                key={chat.id}
+                onClick={() => onSelectChat(chat.id)}
+                className={`block w-full truncate rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                  activeChatId === chat.id
+                    ? "bg-sand text-ink"
+                    : "text-ink/70 hover:bg-sand/60 hover:text-ink"
+                }`}
+              >
+                {chat.title}
+              </button>
+            ))
           )}
         </div>
       </div>
