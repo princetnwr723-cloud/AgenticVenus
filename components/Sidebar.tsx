@@ -1,9 +1,9 @@
 "use client";
 
 // components/Sidebar.tsx
-// Left navigation for the workspace — mirrors Claude's layout:
-// logo, "New chat", a chat list placeholder, and account/provider status
-// pinned to the bottom.
+// Left navigation for the workspace — New chat, feature sections
+// (Scheduler, Plugins, MCP Tools, Business DNA), and account/provider
+// status pinned to the bottom.
 
 import type { Provider } from "@/lib/providers";
 
@@ -12,6 +12,10 @@ type Props = {
   connected: Provider | null;
   onNewChat: () => void;
   onSwitchModel: () => void;
+  onOpenScheduler: () => void;
+  onOpenPlugins: () => void;
+  onOpenMCP: () => void;
+  onOpenBusinessDNA: () => void;
   onLogout: () => void;
   hasMessages: boolean;
 };
@@ -21,6 +25,10 @@ export default function Sidebar({
   connected,
   onNewChat,
   onSwitchModel,
+  onOpenScheduler,
+  onOpenPlugins,
+  onOpenMCP,
+  onOpenBusinessDNA,
   onLogout,
   hasMessages,
 }: Props) {
@@ -39,18 +47,21 @@ export default function Sidebar({
           className="focus-ring flex w-full items-center gap-2 rounded-md border border-ink/10 bg-white px-3 py-2.5 text-sm font-medium text-ink transition-all hover:-translate-y-0.5 hover:bg-sand hover:shadow-sm"
         >
           <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
-            <path
-              d="M7.5 2v11M2 7.5h11"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              strokeLinecap="round"
-            />
+            <path d="M7.5 2v11M2 7.5h11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
           </svg>
           New chat
         </button>
       </div>
 
-      <div className="mt-6 flex-1 overflow-y-auto px-3">
+      {/* Feature sections */}
+      <div className="mt-4 space-y-0.5 px-3">
+        <NavItem icon={<SchedulerIcon />} label="Scheduler" onClick={onOpenScheduler} />
+        <NavItem icon={<PluginIcon />} label="Plugins" onClick={onOpenPlugins} />
+        <NavItem icon={<MCPIcon />} label="MCP Tools" onClick={onOpenMCP} />
+        <NavItem icon={<BusinessIcon />} label="Business DNA" onClick={onOpenBusinessDNA} />
+      </div>
+
+      <div className="mt-5 flex-1 overflow-y-auto px-3">
         <p className="px-2 text-xs font-medium uppercase tracking-wide text-ink/35">
           Chats
         </p>
@@ -95,5 +106,62 @@ export default function Sidebar({
         </div>
       </div>
     </aside>
+  );
+}
+
+function NavItem({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="focus-ring flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm text-ink/70 transition-colors hover:bg-sand hover:text-ink"
+    >
+      <span className="text-ink/50">{icon}</span>
+      {label}
+    </button>
+  );
+}
+
+function SchedulerIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <rect x="2" y="3" width="11" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M2 6h11M5 2v2M10 2v2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function PluginIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <path d="M5 3v2M10 3v2M3 6h9v3a4.5 4.5 0 01-9 0V6z" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M7.5 12.5V14" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function MCPIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <circle cx="4" cy="4" r="2" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="11" cy="11" r="2" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M5.5 5.5L9.5 9.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function BusinessIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <rect x="3" y="6" width="9" height="6.5" rx="1" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M5.5 6V4a2 2 0 012-2h0a2 2 0 012 2v2" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
   );
 }
