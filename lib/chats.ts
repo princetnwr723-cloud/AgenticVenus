@@ -30,6 +30,7 @@ export type ChatRecord = {
   title: string;
   messages: ChatMessage[];
   agentId?: string;
+  providerId?: string;
 };
 
 export async function listChats(uid: string): Promise<ChatSummary[]> {
@@ -53,6 +54,7 @@ export async function getChat(uid: string, chatId: string): Promise<ChatRecord |
     title: data.title || "Untitled chat",
     messages: data.messages || [],
     agentId: data.agentId,
+    providerId: data.providerId,
   };
 }
 
@@ -77,12 +79,14 @@ export async function saveChatMessages(
   uid: string,
   chatId: string,
   messages: ChatMessage[],
-  agentId?: string
+  agentId?: string,
+  providerId?: string
 ) {
   const ref = doc(db, "users", uid, "chats", chatId);
   await updateDoc(ref, {
     messages,
     ...(agentId ? { agentId } : {}),
+    ...(providerId ? { providerId } : {}),
     updatedAt: serverTimestamp(),
   });
 }
