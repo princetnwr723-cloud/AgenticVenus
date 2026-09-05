@@ -86,7 +86,8 @@ export const AGENT_TEAM: Agent[] = [
 export async function classifyAgent(
   providerId: string,
   apiKey: string,
-  task: string
+  task: string,
+  model?: string
 ): Promise<Agent> {
   const roster = AGENT_TEAM.map((a) => `${a.id}: ${a.description}`).join("\n");
   const classifierPrompt: ChatMessage[] = [
@@ -101,6 +102,7 @@ export async function classifyAgent(
       providerId,
       apiKey,
       messages: classifierPrompt,
+      model,
     });
     const normalized = reply.trim().toLowerCase();
     const match = AGENT_TEAM.find((a) => normalized.includes(a.id));
