@@ -8,7 +8,7 @@
 // API key, the field for that appears instead. If it needs nothing, it
 // connects immediately.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import SlideOverPanel from "@/components/SlideOverPanel";
 import { addMCPServer, deleteMCPServer, listMCPServers, type MCPServer } from "@/lib/mcp";
 import { probeMcpServer, startMcpOAuth, discoverMcpTools, type ProbeResult } from "@/lib/mcpOrchestrator";
@@ -17,9 +17,10 @@ type Props = {
   uid: string;
   open: boolean;
   onClose: () => void;
+  prefill?: { name: string; url: string } | null;
 };
 
-export default function MCPPanel({ uid, open, onClose }: Props) {
+export default function MCPPanel({ uid, open, onClose, prefill }: Props) {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -29,6 +30,18 @@ export default function MCPPanel({ uid, open, onClose }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadedList, setLoadedList] = useState(false);
+
+  useEffect(() => {
+    if (open && prefill) {
+      setName(prefill.name);
+      setUrl(prefill.url);
+      setProbe(null);
+      // Auto-check right away so the user lands straight on the OAuth/API key step.
+      probeMcpServer(prefill.url)
+        .then(setProbe)
+        .catch(() => setProbe({ authType: "apikey" }));
+    }
+  }, [open, prefill]);
 
   async function refresh() {
     setServers(await listMCPServers(uid));
