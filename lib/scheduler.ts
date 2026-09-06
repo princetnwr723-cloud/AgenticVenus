@@ -104,7 +104,7 @@ export async function runDueTasks(
   for (const task of due) {
     const ref = doc(db, "users", uid, "scheduledTasks", task.id);
     try {
-      const reply = await sendChatMessage({
+      const { text: reply } = await sendChatMessage({
         providerId,
         apiKey,
         messages: [{ role: "user", content: task.message }],
