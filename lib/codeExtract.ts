@@ -14,8 +14,12 @@ export type CodeFile = {
 const FENCE_RE = /```(\w+)?\n([\s\S]*?)```/g;
 
 export function extractCodeFiles(messages: ChatMessage[]): CodeFile[] {
-  const files: CodeFile[] = [];
-  let index = 0;
+  // Keyed by filename so that when the agent updates a file in a later
+  // message, the new version replaces the old one instead of both
+  // showing up side by side (which is what caused old/new code to look
+  // "mixed" in Codespace).
+  const byFilename = new Map<string, CodeFile>();
+  let autoIndex = 0;
 
   for (const message of messages) {
     if (message.role !== "assistant") continue;
@@ -26,14 +30,15 @@ export function extractCodeFiles(messages: ChatMessage[]): CodeFile[] {
       const body = match[2].trim();
       const firstLine = body.split("\n")[0];
       const filenameMatch = firstLine.match(/filename:\s*(\S+)/i);
-      const filename = filenameMatch ? filenameMatch[1] : `snippet-${index + 1}.${extFor(language)}`;
+      const filename = filenameMatch ? filenameMatch[1] : `snippet-${++autoIndex}.${extFor(language)}`;
       const code = filenameMatch ? body.split("\n").slice(1).join("\n") : body;
 
-      files.push({ id: `${index}`, filename, language, code });
-      index += 1;
+      // A later message with the same filename overwrites the earlier
+      // version, so Codespace always shows the current, up-to-date file.
+      byFilename.set(filename, { id: filename, filename, language, code });
     }
   }
-  return files;
+  return Array.from(byFilename.values());
 }
 
 function extFor(language: string): string {
