@@ -36,6 +36,8 @@ import { runDueTasks, addScheduledTask, nextOccurrence } from "@/lib/scheduler";
 import { detectScheduleIntent } from "@/lib/scheduleDetect";
 import { detectToolNeed, type ToolNeed } from "@/lib/toolDetect";
 import { listConnectedPluginIds, connectedToolNames } from "@/lib/pluginConnections";
+import { listMCPServers, type MCPServer } from "@/lib/mcp";
+import { decideMcpToolCall, callMcpTool } from "@/lib/mcpOrchestrator";
 import { extractCodeFiles } from "@/lib/codeExtract";
 import {
   listChats,
@@ -57,6 +59,8 @@ export default function HomePage() {
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
   const [businessDNA, setBusinessDNA] = useState<BusinessDNA | null>(null);
   const [connectedToolIds, setConnectedToolIds] = useState<string[]>([]);
+  const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
+  const [usingMcpTool, setUsingMcpTool] = useState<string | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [forceSelect, setForceSelect] = useState(false);
@@ -112,11 +116,12 @@ export default function HomePage() {
     if (!user) return;
     (async () => {
       try {
-        const [existing, allConns, dna, toolIds] = await Promise.all([
+        const [existing, allConns, dna, toolIds, servers] = await Promise.all([
           getPrimaryConnection(user.uid),
           getAllConnections(user.uid),
           getBusinessDNA(user.uid),
           listConnectedPluginIds(user.uid),
+          listMCPServers(user.uid),
         ]);
         setConnections(allConns);
         if (existing) {
@@ -129,6 +134,7 @@ export default function HomePage() {
         }
         setBusinessDNA(dna);
         setConnectedToolIds(toolIds);
+        setMcpServers(servers);
         await refreshChats();
       } catch (err) {
         console.error("[home] failed to load workspace data:", err);
@@ -332,15 +338,39 @@ export default function HomePage() {
     setActiveAgent(agent);
     setClassifying(false);
 
-    // 2. The chosen specialist answers for real — with Business DNA and
-    // its connected-tools awareness layered into its system prompt.
+    // 1.5 If an MCP tool (e.g. Creatify) looks relevant, actually call it
+    // for real via our server route, and fold the result into the reply.
+    let toolResultNote = "";
+    if (mcpServers.length > 0) {
+      const toolCall = await decideMcpToolCall(provider.id, activeKey, task, mcpServers, model);
+      if (toolCall) {
+        setUsingMcpTool(toolCall.toolName);
+        try {
+          const result = await callMcpTool(
+            toolCall.serverUrl,
+            toolCall.toolName,
+            toolCall.arguments,
+            toolCall.serverAuthHeader
+          );
+          toolResultNote = `You just used the "${toolCall.toolName}" tool and got this result:\n${result}\n\nIncorporate this into your reply to the user naturally — don't just repeat it verbatim, explain what it means.`;
+        } catch (err) {
+          toolResultNote = `You attempted to use the "${toolCall.toolName}" tool but the call failed: ${
+            err instanceof Error ? err.message : "unknown error"
+          }. Tell the user plainly that the tool call failed and why, so they can fix it (e.g. a missing API key, or the request needs more specific details).`;
+        }
+        setUsingMcpTool(null);
+      }
+    }
+
+    // 2. The chosen specialist answers for real — with Business DNA, its
+    // connected-tools awareness, and any MCP tool result layered in.
     setSending(true);
     const toolNames = connectedToolNames(connectedToolIds);
     const toolsContext =
       toolNames.length > 0
         ? `You currently have access to these connected tools: ${toolNames.join(", ")}. If asked to do something with one of them, answer as if you used it. If asked to do something requiring a tool NOT in this list, tell the user they can connect it in Plugins, or through MCP Tools if it's not a built-in plugin.`
         : "You don't have any tools connected yet. If a request needs an external tool (email, calendar, etc.), tell the user to connect it in Plugins or MCP Tools.";
-    const systemPrompt = [agent.systemPrompt, buildBusinessContext(businessDNA), toolsContext]
+    const systemPrompt = [agent.systemPrompt, buildBusinessContext(businessDNA), toolsContext, toolResultNote]
       .filter(Boolean)
       .join("\n\n");
 
@@ -431,7 +461,7 @@ export default function HomePage() {
         </div>
 
         {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-8">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto bg-cream-dark/40 px-6 py-8">
           <div className="mx-auto flex max-w-3xl flex-col gap-6">
             {messages.length === 0 && (
               <div className="animate-fade-in-up mt-16 text-center">
@@ -470,6 +500,11 @@ export default function HomePage() {
             {classifying && (
               <p className="animate-fade-in text-xs text-ink/40">
                 The boss agent is choosing the right specialist for this task...
+              </p>
+            )}
+            {usingMcpTool && (
+              <p className="animate-fade-in text-xs text-ink/40">
+                Using {usingMcpTool}...
               </p>
             )}
             {sending && <TypingIndicator />}
@@ -544,7 +579,14 @@ export default function HomePage() {
         highlightToolId={highlightToolId}
         onConnectionsChange={setConnectedToolIds}
       />
-      <MCPPanel uid={user.uid} open={mcpOpen} onClose={() => setMcpOpen(false)} />
+      <MCPPanel
+        uid={user.uid}
+        open={mcpOpen}
+        onClose={async () => {
+          setMcpOpen(false);
+          setMcpServers(await listMCPServers(user.uid));
+        }}
+      />
       <BusinessDNAPanel
         uid={user.uid}
         open={businessOpen}
