@@ -29,3 +29,25 @@ export async function disconnectPlugin(uid: string, toolId: string) {
 export function connectedToolNames(connectedIds: string[]): string[] {
   return PLUGIN_TOOLS.filter((t) => connectedIds.includes(t.id)).map((t) => t.name);
 }
+
+/** A plugin should count as "connected" if either its own toggle is on,
+ * OR the user already has a real MCP server connected whose name matches
+ * it (e.g. an MCP server literally named "Gmail" covers the Gmail
+ * plugin). This is what makes the tool-awareness system recognize a
+ * Gmail MCP connection instead of asking to "connect Gmail in Plugins"
+ * when it's already working through MCP. */
+export function effectiveConnectedToolIds(
+  connectedIds: string[],
+  mcpServers: { name: string }[]
+): string[] {
+  const mcpCovered = PLUGIN_TOOLS.filter((t) => {
+    const toolId = t.id.toLowerCase();
+    const toolName = t.name.toLowerCase();
+    return mcpServers.some((s) => {
+      const serverName = s.name.toLowerCase();
+      return serverName.includes(toolId) || serverName.includes(toolName) || toolName.includes(serverName);
+    });
+  }).map((t) => t.id);
+
+  return Array.from(new Set([...connectedIds, ...mcpCovered]));
+}
