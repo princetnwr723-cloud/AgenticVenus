@@ -40,6 +40,7 @@ import {
   getChat,
   saveChatMessages,
   type ChatSummary,
+  type ChatRecord,
 } from "@/lib/chats";
 
 export default function HomePage() {
@@ -71,6 +72,7 @@ export default function HomePage() {
   // Chat persistence
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [chatId, setChatId] = useState<string | null>(null);
+  const [telegram, setTelegram] = useState<ChatRecord["telegram"]>(null);
 
   // Personalized greeting
   const [greeting, setGreeting] = useState<string | null>(null);
@@ -146,12 +148,24 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!user || !connected || !apiKey) return;
-    runDueTasks(user.uid, connected.id, apiKey);
-    const interval = setInterval(() => {
-      runDueTasks(user.uid, connected.id, apiKey);
-    }, 60_000);
+    const defaultModel = connections.find((c) => c.provider.id === connected.id)?.model;
+
+    const run = async () => {
+      const affectedChatIds = await runDueTasks(user.uid, connected.id, apiKey, defaultModel);
+      if (affectedChatIds.length) {
+        await refreshChats();
+        if (chatId && affectedChatIds.includes(chatId)) {
+          const chat = await getChat(user.uid, chatId);
+          if (chat) setMessages(chat.messages);
+        }
+      }
+    };
+
+    run();
+    const interval = setInterval(run, 60_000);
     return () => clearInterval(interval);
-  }, [user, connected, apiKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, connected, apiKey, connections, chatId]);
 
   useEffect(() => {
     if (!activeConnection || !businessDNA || messages.length > 0) return;
@@ -172,6 +186,20 @@ export default function HomePage() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages, sending]);
+
+  // If this chat has a Telegram bot connected, someone could be messaging
+  // it from Telegram right now — poll for new messages so the web view
+  // stays in sync without needing a manual refresh.
+  useEffect(() => {
+    if (!user || !chatId || !telegram?.botUsername) return;
+    const interval = setInterval(async () => {
+      const chat = await getChat(user.uid, chatId);
+      if (chat && chat.messages.length !== messages.length) {
+        setMessages(chat.messages);
+      }
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [user, chatId, telegram?.botUsername, messages.length]);
 
   if (loading || !user || checkingConnection) {
     return (
@@ -201,6 +229,7 @@ export default function HomePage() {
     setActiveAgent(null);
     setChatId(null);
     setGreeting(null);
+    setTelegram(null);
     setActiveProviderId(connected?.id ?? null);
   }
 
@@ -212,6 +241,7 @@ export default function HomePage() {
     setMessages(chat.messages);
     setActiveAgent(chat.agentId ? getAgentById(chat.agentId) : null);
     setActiveProviderId(chat.providerId ?? connected?.id ?? null);
+    setTelegram(chat.telegram ?? null);
     setGreeting(null);
     setError(null);
   }
@@ -267,12 +297,12 @@ export default function HomePage() {
     const intent = await detectScheduleIntent(provider.id, activeKey, task, model);
     if (intent) {
       const runAt = nextOccurrence(intent.time);
-      await addScheduledTask(user.uid, intent.taskMessage, runAt, intent.recurrence);
+      await addScheduledTask(user.uid, intent.taskMessage, runAt, intent.recurrence, currentChatId);
       const confirmation: ChatMessage = {
         role: "assistant",
         content: `Done — I've scheduled "${intent.taskMessage}" to run ${
           intent.recurrence === "daily" ? "every day" : "once"
-        } at ${intent.time}. You'll find it under Scheduler, and I'll drop the result there each time it runs.`,
+        } at ${intent.time}. I'll post the result right here in this chat each time it runs (also visible under Scheduler).`,
       };
       const finalMessages = [...nextMessages, confirmation];
       setMessages(finalMessages);
@@ -498,6 +528,9 @@ export default function HomePage() {
           setSettingsOpen(false);
           setModalOpen(true);
         }}
+        chatId={chatId}
+        telegram={telegram}
+        onTelegramChange={setTelegram}
       />
     </main>
   );
