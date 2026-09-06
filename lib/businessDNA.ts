@@ -72,13 +72,13 @@ export async function generateGreeting(
   const prompt = `${context}\n\nWrite ONE short, warm greeting (max 2 sentences) to open a new conversation with the business owner. Greet them like a colleague who already knows the business well — reference something specific about it (not generic). Don't ask "how can I help" as a throwaway line, make it feel personal. Reply with just the greeting text, nothing else.`;
 
   try {
-    const reply = await sendChatMessage({
+    const { text } = await sendChatMessage({
       providerId,
       apiKey,
       messages: [{ role: "user", content: prompt }],
       model,
     });
-    return reply.trim();
+    return text.trim();
   } catch {
     return null;
   }
