@@ -8,6 +8,7 @@
 
 import { useState } from "react";
 import type { ChatMessage as ChatMessageType } from "@/lib/chatClient";
+import { renderMarkdown } from "@/lib/markdown";
 
 type Props = {
   message: ChatMessageType;
@@ -54,9 +55,10 @@ export function ChatMessageItem({ message, onEdit }: Props) {
       </span>
       <div className="min-w-0 flex-1">
         <div className="max-w-[85%] rounded-2xl bg-cream-dark/70 px-4 py-3">
-          <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink">
-            {message.content}
-          </p>
+          <div
+            className="text-[15px] leading-relaxed text-ink [&_br]:content-['']"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }}
+          />
         </div>
         <div className="mt-1 flex items-center gap-3 opacity-0 transition-opacity group-hover:opacity-100">
           <button onClick={handleCopy} className="text-xs text-ink/40 hover:text-ink">
