@@ -38,6 +38,7 @@ import { detectToolNeed, type ToolNeed } from "@/lib/toolDetect";
 import { listConnectedPluginIds, connectedToolNames, effectiveConnectedToolIds } from "@/lib/pluginConnections";
 import { listMCPServers, type MCPServer } from "@/lib/mcp";
 import { decideMcpToolCall, callMcpTool } from "@/lib/mcpOrchestrator";
+import { decidePluginAction, callPluginAction } from "@/lib/pluginOrchestrator";
 import { extractCodeFiles } from "@/lib/codeExtract";
 import {
   listChats,
@@ -61,6 +62,7 @@ export default function HomePage() {
   const [connectedToolIds, setConnectedToolIds] = useState<string[]>([]);
   const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
   const [usingMcpTool, setUsingMcpTool] = useState<string | null>(null);
+  const [usingPluginAction, setUsingPluginAction] = useState<string | null>(null);
   const [mcpBanner, setMcpBanner] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -162,17 +164,26 @@ export default function HomePage() {
   useEffect(() => {
     if (!user) return;
     const params = new URLSearchParams(window.location.search);
-    const connected = params.get("mcpConnected");
+    const mcpConnected = params.get("mcpConnected");
     const mcpError = params.get("mcpError");
-    if (!connected && !mcpError) return;
+    const pluginConnected = params.get("pluginConnected");
+    const pluginError = params.get("pluginError");
+    if (!mcpConnected && !mcpError && !pluginConnected && !pluginError) return;
 
-    if (connected) {
-      setMcpBanner({ type: "success", text: `Connected to ${connected}.` });
+    if (mcpConnected) {
+      setMcpBanner({ type: "success", text: `Connected to ${mcpConnected}.` });
       setMcpOpen(true);
       listMCPServers(user.uid).then(setMcpServers);
     } else if (mcpError) {
       setMcpBanner({ type: "error", text: mcpError });
       setMcpOpen(true);
+    } else if (pluginConnected) {
+      setMcpBanner({ type: "success", text: `Connected to ${pluginConnected}.` });
+      setPluginsOpen(true);
+      listConnectedPluginIds(user.uid).then(setConnectedToolIds);
+    } else if (pluginError) {
+      setMcpBanner({ type: "error", text: pluginError });
+      setPluginsOpen(true);
     }
     window.history.replaceState({}, "", "/home");
     const timer = setTimeout(() => setMcpBanner(null), 6000);
@@ -384,6 +395,25 @@ export default function HomePage() {
       }
     }
 
+    // 1.6 Same idea, but for plugins with a real dedicated connection
+    // (like Gmail via OAuth) — actually send the email / create the
+    // draft / etc. instead of just talking about it.
+    if (effectiveToolIds.length > 0) {
+      const planned = await decidePluginAction(provider.id, activeKey, task, connectedToolIds, model);
+      if (planned) {
+        setUsingPluginAction(planned.actionName);
+        try {
+          const result = await callPluginAction(planned.toolId, planned.actionId, planned.params);
+          toolResultNote += `\n\nYou just used "${planned.actionName}" for real and got this result:\n${result}\n\nTell the user what happened, referencing the real outcome above.`;
+        } catch (err) {
+          toolResultNote += `\n\nYou attempted "${planned.actionName}" but it failed: ${
+            err instanceof Error ? err.message : "unknown error"
+          }. Tell the user plainly what went wrong.`;
+        }
+        setUsingPluginAction(null);
+      }
+    }
+
     // 2. The chosen specialist answers for real — with Business DNA, its
     // connected-tools awareness, and any MCP tool result layered in.
     setSending(true);
@@ -544,6 +574,11 @@ export default function HomePage() {
             {usingMcpTool && (
               <p className="animate-fade-in text-xs text-ink/40">
                 Using {usingMcpTool}...
+              </p>
+            )}
+            {usingPluginAction && (
+              <p className="animate-fade-in text-xs text-ink/40">
+                {usingPluginAction}...
               </p>
             )}
             {sending && <TypingIndicator />}
