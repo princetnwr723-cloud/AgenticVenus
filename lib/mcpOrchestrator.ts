@@ -1,41 +1,64 @@
 // lib/mcpOrchestrator.ts
-// Client-side glue: calls our /api/mcp/* routes (which speak the real MCP
-// protocol server-side), and uses the connected AI itself to decide
-// whether a task should trigger one of the MCP tools the user has set up
-// — and with what arguments — before answering.
+// Client-side glue for MCP: probing a URL to know what auth it needs,
+// kicking off the OAuth "Continue to X" flow, and — once a server is
+// connected — using the AI itself to decide whether a task needs one of
+// its tools, then actually calling it.
 
 import { auth } from "@/lib/firebase";
 import { sendChatMessage } from "@/lib/chatClient";
 import type { MCPServer } from "@/lib/mcp";
 import type { MCPToolInfo } from "@/lib/mcpClient";
 
-async function authHeader() {
+async function authedHeaders() {
   const idToken = await auth.currentUser?.getIdToken();
   if (!idToken) throw new Error("Not signed in.");
-  return { authorization: `Bearer ${idToken}` };
+  return { "content-type": "application/json", authorization: `Bearer ${idToken}` };
 }
 
-export async function discoverMcpTools(serverUrl: string, serverAuthHeader?: string): Promise<MCPToolInfo[]> {
+export type ProbeResult =
+  | { authType: "none" }
+  | { authType: "oauth" }
+  | { authType: "apikey" };
+
+export async function probeMcpServer(serverUrl: string): Promise<ProbeResult> {
+  const res = await fetch("/api/mcp/probe", {
+    method: "POST",
+    headers: await authedHeaders(),
+    body: JSON.stringify({ serverUrl }),
+  });
+  const data = await res.json();
+  return { authType: data.authType || "apikey" };
+}
+
+/** Starts the real OAuth login for a server and returns the URL to send
+ * the browser to — this is the "Continue to X" button's action. */
+export async function startMcpOAuth(serverName: string, serverUrl: string): Promise<string> {
+  const res = await fetch("/api/mcp/oauth/start", {
+    method: "POST",
+    headers: await authedHeaders(),
+    body: JSON.stringify({ serverName, serverUrl }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || "Failed to start OAuth login.");
+  return data.authUrl as string;
+}
+
+export async function discoverMcpTools(serverUrl: string, apiKeyHeader?: string): Promise<MCPToolInfo[]> {
   const res = await fetch("/api/mcp/tools", {
     method: "POST",
-    headers: { "content-type": "application/json", ...(await authHeader()) },
-    body: JSON.stringify({ serverUrl, authHeader: serverAuthHeader }),
+    headers: await authedHeaders(),
+    body: JSON.stringify({ serverUrl, apiKeyHeader }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error || "Failed to reach the MCP server.");
   return data.tools as MCPToolInfo[];
 }
 
-export async function callMcpTool(
-  serverUrl: string,
-  toolName: string,
-  args: Record<string, any>,
-  serverAuthHeader?: string
-): Promise<string> {
+export async function callMcpTool(serverId: string, toolName: string, args: Record<string, any>): Promise<string> {
   const res = await fetch("/api/mcp/call", {
     method: "POST",
-    headers: { "content-type": "application/json", ...(await authHeader()) },
-    body: JSON.stringify({ serverUrl, toolName, arguments: args, authHeader: serverAuthHeader }),
+    headers: await authedHeaders(),
+    body: JSON.stringify({ serverId, toolName, arguments: args }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error || "The MCP tool call failed.");
@@ -44,8 +67,6 @@ export async function callMcpTool(
 
 export type PlannedToolCall = {
   serverId: string;
-  serverUrl: string;
-  serverAuthHeader?: string;
   toolName: string;
   arguments: Record<string, any>;
 };
@@ -72,7 +93,7 @@ export async function decideMcpToolCall(
     .flatMap((s) =>
       (s.tools || []).map(
         (t) =>
-          `serverId: ${s.id} | tool: ${t.name} | description: ${t.description || "(none)"} | inputSchema: ${JSON.stringify(
+          `serverId: ${s.id} | server: ${s.name} | tool: ${t.name} | description: ${t.description || "(none)"} | inputSchema: ${JSON.stringify(
             t.inputSchema || {}
           )}`
       )
@@ -94,13 +115,7 @@ export async function decideMcpToolCall(
     const server = servers.find((s) => s.id === parsed.serverId);
     if (!server) return null;
 
-    return {
-      serverId: server.id,
-      serverUrl: server.url,
-      serverAuthHeader: server.authHeader,
-      toolName: parsed.toolName,
-      arguments: parsed.arguments || {},
-    };
+    return { serverId: server.id, toolName: parsed.toolName, arguments: parsed.arguments || {} };
   } catch {
     return null;
   }
