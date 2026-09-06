@@ -61,6 +61,7 @@ export default function HomePage() {
   const [connectedToolIds, setConnectedToolIds] = useState<string[]>([]);
   const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
   const [usingMcpTool, setUsingMcpTool] = useState<string | null>(null);
+  const [mcpBanner, setMcpBanner] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [forceSelect, setForceSelect] = useState(false);
@@ -154,6 +155,28 @@ export default function HomePage() {
       sessionStorage.removeItem("agenticvenus_draft");
     }
   }, []);
+
+  // After redirecting back from an MCP server's OAuth login, show what
+  // happened and refresh the connected-servers list.
+  useEffect(() => {
+    if (!user) return;
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("mcpConnected");
+    const mcpError = params.get("mcpError");
+    if (!connected && !mcpError) return;
+
+    if (connected) {
+      setMcpBanner({ type: "success", text: `Connected to ${connected}.` });
+      setMcpOpen(true);
+      listMCPServers(user.uid).then(setMcpServers);
+    } else if (mcpError) {
+      setMcpBanner({ type: "error", text: mcpError });
+      setMcpOpen(true);
+    }
+    window.history.replaceState({}, "", "/home");
+    const timer = setTimeout(() => setMcpBanner(null), 6000);
+    return () => clearTimeout(timer);
+  }, [user]);
 
   useEffect(() => {
     if (!user || !connected || !apiKey) return;
@@ -346,12 +369,7 @@ export default function HomePage() {
       if (toolCall) {
         setUsingMcpTool(toolCall.toolName);
         try {
-          const result = await callMcpTool(
-            toolCall.serverUrl,
-            toolCall.toolName,
-            toolCall.arguments,
-            toolCall.serverAuthHeader
-          );
+          const result = await callMcpTool(toolCall.serverId, toolCall.toolName, toolCall.arguments);
           toolResultNote = `You just used the "${toolCall.toolName}" tool and got this result:\n${result}\n\nIncorporate this into your reply to the user naturally — don't just repeat it verbatim, explain what it means.`;
         } catch (err) {
           toolResultNote = `You attempted to use the "${toolCall.toolName}" tool but the call failed: ${
@@ -370,7 +388,13 @@ export default function HomePage() {
       toolNames.length > 0
         ? `You currently have access to these connected tools: ${toolNames.join(", ")}. If asked to do something with one of them, answer as if you used it. If asked to do something requiring a tool NOT in this list, tell the user they can connect it in Plugins, or through MCP Tools if it's not a built-in plugin.`
         : "You don't have any tools connected yet. If a request needs an external tool (email, calendar, etc.), tell the user to connect it in Plugins or MCP Tools.";
-    const systemPrompt = [agent.systemPrompt, buildBusinessContext(businessDNA), toolsContext, toolResultNote]
+    const systemPrompt = [
+      agent.systemPrompt,
+      buildBusinessContext(businessDNA),
+      toolsContext,
+      toolResultNote,
+      "Formatting: use **bold** around the genuinely important parts of your answer — key numbers, names, decisions, or action items — so they stand out. Don't bold everything; be selective. Use markdown lists and short paragraphs where that helps readability.",
+    ]
       .filter(Boolean)
       .join("\n\n");
 
@@ -463,6 +487,17 @@ export default function HomePage() {
         {/* Messages */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto bg-cream-dark/40 px-6 py-8">
           <div className="mx-auto flex max-w-3xl flex-col gap-6">
+            {mcpBanner && (
+              <div
+                className={`animate-fade-in-up rounded-md border px-4 py-2.5 text-sm ${
+                  mcpBanner.type === "success"
+                    ? "border-moss/30 bg-moss/10 text-moss"
+                    : "border-red-200 bg-red-50 text-red-700"
+                }`}
+              >
+                {mcpBanner.text}
+              </div>
+            )}
             {messages.length === 0 && (
               <div className="animate-fade-in-up mt-16 text-center">
                 <h1 className="font-serif text-3xl text-ink">
