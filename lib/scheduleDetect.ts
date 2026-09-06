@@ -34,13 +34,13 @@ Reply with ONLY raw JSON, no other text, in exactly this shape:
 If it is not a scheduling request, reply {"isSchedule": false, "taskMessage": "", "time": "", "recurrence": "once"}.`;
 
   try {
-    const reply = await sendChatMessage({
+    const { text } = await sendChatMessage({
       providerId,
       apiKey,
       messages: [{ role: "user", content: prompt }],
       model,
     });
-    const parsed = JSON.parse(extractJson(reply));
+    const parsed = JSON.parse(extractJson(text));
     if (!parsed?.isSchedule || !parsed?.time) return null;
     return {
       taskMessage: parsed.taskMessage || userMessage,
