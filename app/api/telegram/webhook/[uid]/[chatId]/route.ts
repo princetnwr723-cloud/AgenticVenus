@@ -93,10 +93,10 @@ export async function POST(
 
     const reply = await sendChatMessage({ providerId, apiKey, messages, systemPrompt, model });
 
-    const updatedMessages = [...messages, { role: "assistant" as const, content: reply }];
+    const updatedMessages = [...messages, { role: "assistant" as const, content: reply.text }];
     await chatRef.update({ messages: updatedMessages, updatedAt: new Date() });
 
-    await telegramSendMessage(telegramConfig.botToken, telegramChatId, reply);
+    await telegramSendMessage(telegramConfig.botToken, telegramChatId, reply.text);
 
     return NextResponse.json({ ok: true });
   } catch (err) {
