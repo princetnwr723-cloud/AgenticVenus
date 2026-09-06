@@ -16,6 +16,7 @@ import AgentTeamPanel from "@/components/AgentTeamPanel";
 import CodespacePanel from "@/components/CodespacePanel";
 import ModelDropdown from "@/components/ModelDropdown";
 import SettingsPanel from "@/components/SettingsPanel";
+import ToolConnectPrompt from "@/components/ToolConnectPrompt";
 import {
   getPrimaryConnection,
   getAllConnections,
@@ -33,6 +34,8 @@ import {
 } from "@/lib/businessDNA";
 import { runDueTasks, addScheduledTask, nextOccurrence } from "@/lib/scheduler";
 import { detectScheduleIntent } from "@/lib/scheduleDetect";
+import { detectToolNeed, type ToolNeed } from "@/lib/toolDetect";
+import { listConnectedPluginIds, connectedToolNames } from "@/lib/pluginConnections";
 import { extractCodeFiles } from "@/lib/codeExtract";
 import {
   listChats,
@@ -53,6 +56,7 @@ export default function HomePage() {
   const [connections, setConnections] = useState<SavedConnection[]>([]);
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
   const [businessDNA, setBusinessDNA] = useState<BusinessDNA | null>(null);
+  const [connectedToolIds, setConnectedToolIds] = useState<string[]>([]);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [forceSelect, setForceSelect] = useState(false);
@@ -60,6 +64,7 @@ export default function HomePage() {
   // Feature panels
   const [schedulerOpen, setSchedulerOpen] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
+  const [highlightToolId, setHighlightToolId] = useState<string | null>(null);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [businessOpen, setBusinessOpen] = useState(false);
   const [codespaceOpen, setCodespaceOpen] = useState(false);
@@ -68,6 +73,9 @@ export default function HomePage() {
   // Agent Team
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
   const [classifying, setClassifying] = useState(false);
+
+  // Tool awareness — a pending prompt to connect a needed tool
+  const [toolNeed, setToolNeed] = useState<ToolNeed | null>(null);
 
   // Chat persistence
   const [chats, setChats] = useState<ChatSummary[]>([]);
@@ -85,8 +93,6 @@ export default function HomePage() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // The connection actually used to send messages in THIS conversation —
-  // falls back to the sidebar default if nothing chat-specific is set.
   const activeConnection: SavedConnection | null =
     connections.find((c) => c.provider.id === activeProviderId) ??
     (connected && apiKey ? { provider: connected, apiKey } : null);
@@ -102,19 +108,15 @@ export default function HomePage() {
     setChats(await listChats(user.uid));
   }
 
-  async function refreshConnections() {
-    if (!user) return;
-    setConnections(await getAllConnections(user.uid));
-  }
-
   useEffect(() => {
     if (!user) return;
     (async () => {
       try {
-        const [existing, allConns, dna] = await Promise.all([
+        const [existing, allConns, dna, toolIds] = await Promise.all([
           getPrimaryConnection(user.uid),
           getAllConnections(user.uid),
           getBusinessDNA(user.uid),
+          listConnectedPluginIds(user.uid),
         ]);
         setConnections(allConns);
         if (existing) {
@@ -126,6 +128,7 @@ export default function HomePage() {
           setModalOpen(true);
         }
         setBusinessDNA(dna);
+        setConnectedToolIds(toolIds);
         await refreshChats();
       } catch (err) {
         console.error("[home] failed to load workspace data:", err);
@@ -187,9 +190,6 @@ export default function HomePage() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages, sending]);
 
-  // If this chat has a Telegram bot connected, someone could be messaging
-  // it from Telegram right now — poll for new messages so the web view
-  // stays in sync without needing a manual refresh.
   useEffect(() => {
     if (!user || !chatId || !telegram?.botUsername) return;
     const interval = setInterval(async () => {
@@ -230,6 +230,7 @@ export default function HomePage() {
     setChatId(null);
     setGreeting(null);
     setTelegram(null);
+    setToolNeed(null);
     setActiveProviderId(connected?.id ?? null);
   }
 
@@ -242,8 +243,13 @@ export default function HomePage() {
     setActiveAgent(chat.agentId ? getAgentById(chat.agentId) : null);
     setActiveProviderId(chat.providerId ?? connected?.id ?? null);
     setTelegram(chat.telegram ?? null);
+    setToolNeed(null);
     setGreeting(null);
     setError(null);
+  }
+
+  function handleEditMessage(content: string) {
+    setInput(content);
   }
 
   async function persist(msgs: ChatMessage[], id: string, agentId?: string, providerId?: string) {
@@ -285,6 +291,7 @@ export default function HomePage() {
     setInput("");
     setError(null);
     setGreeting(null);
+    setToolNeed(null);
 
     let currentChatId = chatId;
     if (!currentChatId) {
@@ -292,8 +299,7 @@ export default function HomePage() {
       setChatId(currentChatId);
     }
 
-    // 0. Check if this is a scheduling request ("give me AI news daily at
-    // 10am") — if so, the boss agent sets it up in the Scheduler itself.
+    // 0. Scheduling request? ("give me AI news daily at 10am")
     const intent = await detectScheduleIntent(provider.id, activeKey, task, model);
     if (intent) {
       const runAt = nextOccurrence(intent.time);
@@ -310,27 +316,43 @@ export default function HomePage() {
       return;
     }
 
+    // 0.5 Does this need a tool the agent doesn't have? If it's a known
+    // plugin that isn't connected yet, pause and ask to connect it first
+    // instead of guessing an answer it can't actually carry out.
+    const need = await detectToolNeed(provider.id, activeKey, task, connectedToolIds, model);
+    if (need && !need.connected) {
+      setToolNeed(need);
+      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+      return;
+    }
+
     // 1. Boss agent decides which specialist should handle this task.
     setClassifying(true);
     const agent = await classifyAgent(provider.id, activeKey, task, model);
     setActiveAgent(agent);
     setClassifying(false);
 
-    // 2. The chosen specialist (with Business DNA layered in) answers for real.
+    // 2. The chosen specialist answers for real — with Business DNA and
+    // its connected-tools awareness layered into its system prompt.
     setSending(true);
-    const systemPrompt = [agent.systemPrompt, buildBusinessContext(businessDNA)]
+    const toolNames = connectedToolNames(connectedToolIds);
+    const toolsContext =
+      toolNames.length > 0
+        ? `You currently have access to these connected tools: ${toolNames.join(", ")}. If asked to do something with one of them, answer as if you used it. If asked to do something requiring a tool NOT in this list, tell the user they can connect it in Plugins, or through MCP Tools if it's not a built-in plugin.`
+        : "You don't have any tools connected yet. If a request needs an external tool (email, calendar, etc.), tell the user to connect it in Plugins or MCP Tools.";
+    const systemPrompt = [agent.systemPrompt, buildBusinessContext(businessDNA), toolsContext]
       .filter(Boolean)
       .join("\n\n");
 
     try {
-      const reply = await sendChatMessage({
+      const { text, usage } = await sendChatMessage({
         providerId: provider.id,
         apiKey: activeKey,
         messages: nextMessages,
         systemPrompt,
         model,
       });
-      const finalMessages = [...nextMessages, { role: "assistant" as const, content: reply }];
+      const finalMessages = [...nextMessages, { role: "assistant" as const, content: text, usage }];
       setMessages(finalMessages);
       await persist(finalMessages, currentChatId, agent.id, provider.id);
     } catch (err) {
@@ -356,7 +378,10 @@ export default function HomePage() {
           setModalOpen(true);
         }}
         onOpenScheduler={() => setSchedulerOpen(true)}
-        onOpenPlugins={() => setPluginsOpen(true)}
+        onOpenPlugins={() => {
+          setHighlightToolId(null);
+          setPluginsOpen(true);
+        }}
         onOpenMCP={() => setMcpOpen(true)}
         onOpenBusinessDNA={() => setBusinessOpen(true)}
         onLogout={() => signOut(auth)}
@@ -428,8 +453,19 @@ export default function HomePage() {
             )}
 
             {messages.map((m, i) => (
-              <ChatMessageItem key={i} message={m} />
+              <ChatMessageItem key={i} message={m} onEdit={i === messages.length - 1 && m.role === "user" ? handleEditMessage : undefined} />
             ))}
+
+            {toolNeed && (
+              <ToolConnectPrompt
+                need={toolNeed}
+                onOpenPlugins={() => {
+                  setHighlightToolId(toolNeed.toolId);
+                  setPluginsOpen(true);
+                }}
+                onOpenMCP={() => setMcpOpen(true)}
+              />
+            )}
 
             {classifying && (
               <p className="animate-fade-in text-xs text-ink/40">
@@ -501,7 +537,13 @@ export default function HomePage() {
         onClose={() => setSchedulerOpen(false)}
         hasConnection={!!connected}
       />
-      <PluginsPanel open={pluginsOpen} onClose={() => setPluginsOpen(false)} />
+      <PluginsPanel
+        uid={user.uid}
+        open={pluginsOpen}
+        onClose={() => setPluginsOpen(false)}
+        highlightToolId={highlightToolId}
+        onConnectionsChange={setConnectedToolIds}
+      />
       <MCPPanel uid={user.uid} open={mcpOpen} onClose={() => setMcpOpen(false)} />
       <BusinessDNAPanel
         uid={user.uid}
