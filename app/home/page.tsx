@@ -35,7 +35,7 @@ import {
 import { runDueTasks, addScheduledTask, nextOccurrence } from "@/lib/scheduler";
 import { detectScheduleIntent } from "@/lib/scheduleDetect";
 import { detectToolNeed, type ToolNeed } from "@/lib/toolDetect";
-import { listConnectedPluginIds, connectedToolNames } from "@/lib/pluginConnections";
+import { listConnectedPluginIds, connectedToolNames, effectiveConnectedToolIds } from "@/lib/pluginConnections";
 import { listMCPServers, type MCPServer } from "@/lib/mcp";
 import { decideMcpToolCall, callMcpTool } from "@/lib/mcpOrchestrator";
 import { extractCodeFiles } from "@/lib/codeExtract";
@@ -71,6 +71,7 @@ export default function HomePage() {
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const [highlightToolId, setHighlightToolId] = useState<string | null>(null);
   const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpPrefill, setMcpPrefill] = useState<{ name: string; url: string } | null>(null);
   const [businessOpen, setBusinessOpen] = useState(false);
   const [codespaceOpen, setCodespaceOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -345,10 +346,13 @@ export default function HomePage() {
       return;
     }
 
-    // 0.5 Does this need a tool the agent doesn't have? If it's a known
-    // plugin that isn't connected yet, pause and ask to connect it first
-    // instead of guessing an answer it can't actually carry out.
-    const need = await detectToolNeed(provider.id, activeKey, task, connectedToolIds, model);
+    // 0.5 Does this need a tool the agent doesn't have? A plugin counts as
+    // "connected" here if either its own toggle is on, OR a real MCP
+    // server already covers it (e.g. an MCP server named "Gmail") — this
+    // is what stops the agent asking to "connect Gmail in Plugins" when
+    // Gmail is already working through MCP.
+    const effectiveToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
+    const need = await detectToolNeed(provider.id, activeKey, task, effectiveToolIds, model);
     if (need && !need.connected) {
       setToolNeed(need);
       await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
@@ -383,7 +387,7 @@ export default function HomePage() {
     // 2. The chosen specialist answers for real — with Business DNA, its
     // connected-tools awareness, and any MCP tool result layered in.
     setSending(true);
-    const toolNames = connectedToolNames(connectedToolIds);
+    const toolNames = connectedToolNames(effectiveToolIds);
     const toolsContext =
       toolNames.length > 0
         ? `You currently have access to these connected tools: ${toolNames.join(", ")}. If asked to do something with one of them, answer as if you used it. If asked to do something requiring a tool NOT in this list, tell the user they can connect it in Plugins, or through MCP Tools if it's not a built-in plugin.`
@@ -613,12 +617,19 @@ export default function HomePage() {
         onClose={() => setPluginsOpen(false)}
         highlightToolId={highlightToolId}
         onConnectionsChange={setConnectedToolIds}
+        onOpenMcpWithPrefill={(name, url) => {
+          setMcpPrefill({ name, url });
+          setPluginsOpen(false);
+          setMcpOpen(true);
+        }}
       />
       <MCPPanel
         uid={user.uid}
         open={mcpOpen}
+        prefill={mcpPrefill}
         onClose={async () => {
           setMcpOpen(false);
+          setMcpPrefill(null);
           setMcpServers(await listMCPServers(user.uid));
         }}
       />
