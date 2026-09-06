@@ -7,6 +7,10 @@
 // For true background execution while the app is closed, this same logic
 // would move into a Vercel Cron job hitting a server route with the
 // Firebase Admin SDK — see README.
+//
+// If a task was created from a specific conversation, its result is
+// written back into that same chat (not just the Scheduler panel) so the
+// user sees it appear where they asked for it.
 
 import {
   addDoc,
@@ -22,6 +26,7 @@ import {
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { sendChatMessage } from "@/lib/chatClient";
+import { getChat, saveChatMessages } from "@/lib/chats";
 
 export type Recurrence = "once" | "daily";
 
@@ -32,6 +37,7 @@ export type ScheduledTask = {
   recurrence: Recurrence;
   status: "pending" | "done" | "failed";
   resultText?: string;
+  chatId?: string;
   createdAt?: Timestamp;
 };
 
@@ -46,7 +52,8 @@ export async function addScheduledTask(
   uid: string,
   message: string,
   runAt: Date,
-  recurrence: Recurrence = "once"
+  recurrence: Recurrence = "once",
+  chatId?: string
 ) {
   const ref = collection(db, "users", uid, "scheduledTasks");
   await addDoc(ref, {
@@ -55,6 +62,7 @@ export async function addScheduledTask(
     recurrence,
     status: "pending",
     createdAt: serverTimestamp(),
+    ...(chatId ? { chatId } : {}),
   });
 }
 
@@ -63,8 +71,7 @@ export async function deleteScheduledTask(uid: string, taskId: string) {
 }
 
 /** Given "HH:MM" (24h), returns the next Date that time occurs — today if
- * it hasn't passed yet, otherwise tomorrow. Used for both one-off "at 5pm"
- * requests and to seed a daily recurrence. */
+ * it hasn't passed yet, otherwise tomorrow. */
 export function nextOccurrence(time: string): Date {
   const [h, m] = time.split(":").map((n) => parseInt(n, 10));
   const now = new Date();
@@ -75,21 +82,25 @@ export function nextOccurrence(time: string): Date {
   return candidate;
 }
 
-/** Runs any pending tasks whose time has come, using the given provider
- * connection. Daily tasks are rescheduled 24h ahead instead of being
- * marked done. Returns how many tasks were executed. */
+/** Runs any pending tasks whose time has come. Daily tasks are
+ * rescheduled 24h ahead instead of being marked done. If a task has a
+ * chatId, its result is appended to that chat's messages too. Returns the
+ * ids of any chats that were updated, so the UI can refresh if the user
+ * is currently looking at one of them. */
 export async function runDueTasks(
   uid: string,
   providerId: string,
-  apiKey: string
-): Promise<number> {
+  apiKey: string,
+  model?: string
+): Promise<string[]> {
   const tasks = await listScheduledTasks(uid);
   const now = Date.now();
   const due = tasks.filter(
     (t) => t.status === "pending" && t.runAt.toMillis() <= now
   );
 
-  let ran = 0;
+  const affectedChatIds: string[] = [];
+
   for (const task of due) {
     const ref = doc(db, "users", uid, "scheduledTasks", task.id);
     try {
@@ -97,7 +108,24 @@ export async function runDueTasks(
         providerId,
         apiKey,
         messages: [{ role: "user", content: task.message }],
+        model,
       });
+
+      if (task.chatId) {
+        try {
+          const chat = await getChat(uid, task.chatId);
+          if (chat) {
+            const updated = [
+              ...chat.messages,
+              { role: "assistant" as const, content: `⏰ Scheduled task: ${reply}` },
+            ];
+            await saveChatMessages(uid, task.chatId, updated, chat.agentId, chat.providerId);
+            affectedChatIds.push(task.chatId);
+          }
+        } catch (err) {
+          console.error("[scheduler] failed to write result into chat:", err);
+        }
+      }
 
       if (task.recurrence === "daily") {
         const next = new Date(task.runAt.toMillis());
@@ -116,7 +144,6 @@ export async function runDueTasks(
         resultText: err instanceof Error ? err.message : "Failed to run.",
       });
     }
-    ran += 1;
   }
-  return ran;
+  return affectedChatIds;
 }
