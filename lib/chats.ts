@@ -31,6 +31,7 @@ export type ChatRecord = {
   messages: ChatMessage[];
   agentId?: string;
   providerId?: string;
+  telegram?: { botToken: string; botUsername: string } | null;
 };
 
 export async function listChats(uid: string): Promise<ChatSummary[]> {
@@ -55,6 +56,7 @@ export async function getChat(uid: string, chatId: string): Promise<ChatRecord |
     messages: data.messages || [],
     agentId: data.agentId,
     providerId: data.providerId,
+    telegram: data.telegram ?? null,
   };
 }
 
