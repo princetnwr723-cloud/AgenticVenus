@@ -13,7 +13,7 @@ export const FALLBACK_MODELS: Record<string, string[]> = {
   xai: ["grok-4.6"],
   openrouter: ["openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet"],
   mistral: ["mistral-small-latest", "mistral-large-latest"],
-  groq: ["llama-3.3-70b-versatile"],
+  groq: ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
   deepseek: ["deepseek-chat"],
   perplexity: ["sonar", "sonar-pro"],
   cohere: ["command-r", "command-r-plus"],
