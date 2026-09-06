@@ -24,6 +24,10 @@ export type PluginTool = {
   category: PluginCategory;
   description: string;
   color: string;
+  /** If a real official/public MCP server exists for this tool, its URL —
+   * "Connect" then opens the real MCP connect flow (same as MCP Tools)
+   * instead of the placeholder toggle. */
+  mcpUrl?: string;
 };
 
 export const PLUGIN_CATEGORIES: { id: PluginCategory; label: string; blurb: string }[] = [
@@ -47,21 +51,21 @@ export const PLUGIN_TOOLS: PluginTool[] = [
   { id: "wolfram", name: "Wolfram Alpha", category: "search", description: "Computational & math data.", color: "#DD1100" },
 
   // Email, Calendar & Files
-  { id: "gmail", name: "Gmail", category: "files", description: "Read and send email.", color: "#EA4335" },
+  { id: "gmail", name: "Gmail", category: "files", description: "Read and send email.", color: "#EA4335", mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
   { id: "google-calendar", name: "Google Calendar", category: "files", description: "Check and create events.", color: "#4285F4" },
   { id: "google-drive", name: "Google Drive", category: "files", description: "Docs, Sheets, and Slides.", color: "#0F9D58" },
   { id: "outlook-mail", name: "Outlook Mail", category: "files", description: "Read and send Outlook email.", color: "#0078D4" },
   { id: "outlook-calendar", name: "Outlook Calendar", category: "files", description: "Manage Outlook events.", color: "#0078D4" },
   { id: "onedrive", name: "OneDrive", category: "files", description: "Access Microsoft cloud files.", color: "#094AB2" },
   { id: "sharepoint", name: "SharePoint", category: "files", description: "Company document libraries.", color: "#038387" },
-  { id: "notion", name: "Notion", category: "files", description: "Read and write Notion pages.", color: "#000000" },
+  { id: "notion", name: "Notion", category: "files", description: "Read and write Notion pages.", color: "#000000", mcpUrl: "https://mcp.notion.com/mcp" },
 
   // Communication
   { id: "slack", name: "Slack", category: "communication", description: "Read and send Slack messages.", color: "#4A154B" },
   { id: "ms-teams", name: "Microsoft Teams", category: "communication", description: "Message teams and channels.", color: "#6264A7" },
 
   // Developer Tools
-  { id: "github", name: "GitHub", category: "dev", description: "Issues, PRs, and repos.", color: "#181717" },
+  { id: "github", name: "GitHub", category: "dev", description: "Issues, PRs, and repos.", color: "#181717", mcpUrl: "https://api.githubcopilot.com/mcp/" },
   { id: "linear", name: "Linear", category: "dev", description: "Track and update issues.", color: "#5E6AD2" },
   { id: "vercel", name: "Vercel", category: "dev", description: "Check deploys and projects.", color: "#000000" },
 
