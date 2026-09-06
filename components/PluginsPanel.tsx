@@ -18,9 +18,17 @@ type Props = {
   onClose: () => void;
   highlightToolId?: string | null;
   onConnectionsChange?: (connectedIds: string[]) => void;
+  onOpenMcpWithPrefill?: (name: string, url: string) => void;
 };
 
-export default function PluginsPanel({ uid, open, onClose, highlightToolId, onConnectionsChange }: Props) {
+export default function PluginsPanel({
+  uid,
+  open,
+  onClose,
+  highlightToolId,
+  onConnectionsChange,
+  onOpenMcpWithPrefill,
+}: Props) {
   const [connected, setConnected] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -86,15 +94,25 @@ export default function PluginsPanel({ uid, open, onClose, highlightToolId, onCo
                       <p className="text-xs text-ink/50">{tool.description}</p>
                     </div>
                     <button
-                      onClick={() => toggle(tool.id)}
+                      onClick={() =>
+                        tool.mcpUrl ? onOpenMcpWithPrefill?.(tool.name, tool.mcpUrl) : toggle(tool.id)
+                      }
                       disabled={loading || busyId === tool.id}
                       className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
                         isConnected
                           ? "border-moss/30 bg-moss/10 text-moss hover:bg-moss/20"
+                          : tool.mcpUrl
+                          ? "border-clay/30 bg-clay/10 text-clay hover:bg-clay/20"
                           : "border-ink/10 text-ink/60 hover:bg-sand hover:text-ink"
                       }`}
                     >
-                      {busyId === tool.id ? "..." : isConnected ? "Connected ✓" : "Connect"}
+                      {busyId === tool.id
+                        ? "..."
+                        : isConnected
+                        ? "Connected ✓"
+                        : tool.mcpUrl
+                        ? "Connect (real)"
+                        : "Connect"}
                     </button>
                   </div>
                 );
@@ -105,9 +123,11 @@ export default function PluginsPanel({ uid, open, onClose, highlightToolId, onCo
       </div>
 
       <p className="mt-6 text-xs text-ink/40">
-        "Connect" marks a tool as available to your agent for now — wiring
-        each one to its real account (OAuth) is the next step. Once
-        connected, the agent knows it can use it when you ask.
+        Tools marked <strong className="text-clay">Connect (real)</strong> have
+        an official MCP server, so this opens the real connect flow (OAuth
+        login or API key, same as MCP Tools) — once done, the agent can
+        actually use it. Plain "Connect" tools mark themselves available
+        for now while their real integration is still being built.
       </p>
     </SlideOverPanel>
   );
