@@ -1,16 +1,19 @@
 "use client";
 
 // components/PluginsPanel.tsx
-// Shows every plugin category and tool (matching Grok's real connector
-// list), and lets the user mark tools as connected so the agent knows
-// what it has access to. Marking "connected" here is a placeholder —
-// each service's real OAuth flow is the next step — but it's what powers
-// tool-awareness in chat today (see lib/toolDetect.ts).
+// Tools with a dedicated OAuth app (see lib/oauthProviders.ts) show a
+// real "Continue with X" button — click it, log in on that service,
+// approve access, and you're back here connected for real, exactly like
+// Grok or Claude's plugin pickers. Tools with a public MCP server but no
+// dedicated app open the MCP connect flow instead. Everything else still
+// shows the placeholder toggle until one of those paths is wired for it.
 
 import { useEffect, useState } from "react";
 import SlideOverPanel from "@/components/SlideOverPanel";
 import { PLUGIN_CATEGORIES, PLUGIN_TOOLS } from "@/lib/plugins";
 import { connectPlugin, disconnectPlugin, listConnectedPluginIds } from "@/lib/pluginConnections";
+import { startPluginOAuth } from "@/lib/pluginOrchestrator";
+import { OAUTH_PROVIDERS } from "@/lib/oauthProviders";
 
 type Props = {
   uid: string;
@@ -32,6 +35,7 @@ export default function PluginsPanel({
   const [connected, setConnected] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -60,13 +64,27 @@ export default function PluginsPanel({
     setBusyId(null);
   }
 
+  async function handleOAuthConnect(toolId: string) {
+    setBusyId(toolId);
+    setError(null);
+    try {
+      const authUrl = await startPluginOAuth(toolId);
+      window.location.href = authUrl;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start login.");
+      setBusyId(null);
+    }
+  }
+
   return (
     <SlideOverPanel
       open={open}
       onClose={onClose}
       title="Plugins"
-      subtitle="Mark the tools your agent should be able to use."
+      subtitle="Connect the tools your agent should be able to use."
     >
+      {error && <p className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
+
       <div className="space-y-8">
         {PLUGIN_CATEGORIES.map((cat) => (
           <div key={cat.id}>
@@ -76,6 +94,8 @@ export default function PluginsPanel({
               {PLUGIN_TOOLS.filter((t) => t.category === cat.id).map((tool) => {
                 const isConnected = connected.includes(tool.id);
                 const isHighlighted = highlightToolId === tool.id;
+                const hasOwnOAuth = !!OAUTH_PROVIDERS[tool.id];
+
                 return (
                   <div
                     key={tool.id}
@@ -93,27 +113,39 @@ export default function PluginsPanel({
                       <p className="text-sm font-medium text-ink">{tool.name}</p>
                       <p className="text-xs text-ink/50">{tool.description}</p>
                     </div>
-                    <button
-                      onClick={() =>
-                        tool.mcpUrl ? onOpenMcpWithPrefill?.(tool.name, tool.mcpUrl) : toggle(tool.id)
-                      }
-                      disabled={loading || busyId === tool.id}
-                      className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
-                        isConnected
-                          ? "border-moss/30 bg-moss/10 text-moss hover:bg-moss/20"
-                          : tool.mcpUrl
-                          ? "border-clay/30 bg-clay/10 text-clay hover:bg-clay/20"
-                          : "border-ink/10 text-ink/60 hover:bg-sand hover:text-ink"
-                      }`}
-                    >
-                      {busyId === tool.id
-                        ? "..."
-                        : isConnected
-                        ? "Connected ✓"
-                        : tool.mcpUrl
-                        ? "Connect (real)"
-                        : "Connect"}
-                    </button>
+
+                    {isConnected ? (
+                      <button
+                        onClick={() => toggle(tool.id)}
+                        disabled={busyId === tool.id}
+                        className="shrink-0 rounded-md border border-moss/30 bg-moss/10 px-3 py-1.5 text-xs font-medium text-moss transition-colors hover:bg-moss/20 disabled:opacity-50"
+                      >
+                        {busyId === tool.id ? "..." : "Connected ✓"}
+                      </button>
+                    ) : hasOwnOAuth ? (
+                      <button
+                        onClick={() => handleOAuthConnect(tool.id)}
+                        disabled={busyId === tool.id}
+                        className="shrink-0 rounded-md bg-clay px-3 py-1.5 text-xs font-medium text-cream transition-all hover:scale-[1.03] hover:bg-clay-dark disabled:opacity-50"
+                      >
+                        {busyId === tool.id ? "Redirecting..." : `Continue with ${tool.name}`}
+                      </button>
+                    ) : tool.mcpUrl ? (
+                      <button
+                        onClick={() => onOpenMcpWithPrefill?.(tool.name, tool.mcpUrl!)}
+                        className="shrink-0 rounded-md border border-clay/30 bg-clay/10 px-3 py-1.5 text-xs font-medium text-clay transition-colors hover:bg-clay/20"
+                      >
+                        Connect (real)
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => toggle(tool.id)}
+                        disabled={busyId === tool.id}
+                        className="shrink-0 rounded-md border border-ink/10 px-3 py-1.5 text-xs font-medium text-ink/60 transition-colors hover:bg-sand hover:text-ink disabled:opacity-50"
+                      >
+                        {busyId === tool.id ? "..." : "Connect"}
+                      </button>
+                    )}
                   </div>
                 );
               })}
@@ -123,11 +155,12 @@ export default function PluginsPanel({
       </div>
 
       <p className="mt-6 text-xs text-ink/40">
-        Tools marked <strong className="text-clay">Connect (real)</strong> have
-        an official MCP server, so this opens the real connect flow (OAuth
-        login or API key, same as MCP Tools) — once done, the agent can
-        actually use it. Plain "Connect" tools mark themselves available
-        for now while their real integration is still being built.
+        <strong className="text-clay">Continue with X</strong> is a real
+        login — the agent can actually use it afterward.{" "}
+        <strong className="text-clay">Connect (real)</strong> opens the
+        same real flow through that tool's official MCP server. Plain
+        "Connect" just marks a tool as available for now, while its real
+        integration is still being built.
       </p>
     </SlideOverPanel>
   );
