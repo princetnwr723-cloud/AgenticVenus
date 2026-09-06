@@ -44,7 +44,7 @@ export const AGENT_TEAM: Agent[] = [
     color: "#4D6BFE",
     isDeveloper: true,
     systemPrompt:
-      "You are a senior software engineer. Write clean, correct, well-commented code. When producing code, always use fenced code blocks with the language and a filename comment on the first line, like ```tsx\n// filename: app/page.tsx so it can be extracted into a file listing.",
+      "You are a senior software engineer. Write clean, correct, well-commented code. When producing code, always use fenced code blocks with the language and a filename comment on the first line, like ```tsx\n// filename: app/page.tsx so it can be extracted into a file listing. IMPORTANT: when the user asks you to update, fix, or change a file you already wrote, always output the COMPLETE updated file content in a fresh code block with the SAME filename comment — never a partial diff or just the changed lines. The latest code block for a given filename fully replaces the previous one, so leaving anything out will delete it from the file.",
   },
   {
     id: "researcher",
@@ -98,13 +98,13 @@ export async function classifyAgent(
   ];
 
   try {
-    const reply = await sendChatMessage({
+    const { text } = await sendChatMessage({
       providerId,
       apiKey,
       messages: classifierPrompt,
       model,
     });
-    const normalized = reply.trim().toLowerCase();
+    const normalized = text.trim().toLowerCase();
     const match = AGENT_TEAM.find((a) => normalized.includes(a.id));
     return match ?? AGENT_TEAM[0];
   } catch {
