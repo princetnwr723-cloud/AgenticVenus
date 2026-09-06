@@ -1,10 +1,7 @@
 // lib/mcp.ts
-// Lets a user register an MCP (Model Context Protocol) server so their
-// agent can eventually call tools through it. This stores the config only
-// — actually speaking the MCP protocol (JSON-RPC over stdio/SSE) needs a
-// server-side client, since most MCP servers aren't reachable with a
-// plain browser fetch. That wiring is the natural next step once this
-// config layer is in place.
+// Saves MCP server configs (name, URL, optional auth header, and the
+// tools actually discovered on it) so the agent knows what real
+// capabilities it has beyond the built-in plugins.
 
 import {
   addDoc,
@@ -17,11 +14,14 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import type { MCPToolInfo } from "@/lib/mcpClient";
 
 export type MCPServer = {
   id: string;
   name: string;
   url: string;
+  authHeader?: string;
+  tools?: MCPToolInfo[];
   createdAt?: unknown;
 };
 
@@ -32,9 +32,21 @@ export async function listMCPServers(uid: string): Promise<MCPServer[]> {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() } as MCPServer));
 }
 
-export async function addMCPServer(uid: string, name: string, url: string) {
+export async function addMCPServer(
+  uid: string,
+  name: string,
+  url: string,
+  authHeader?: string,
+  tools?: MCPToolInfo[]
+) {
   const ref = collection(db, "users", uid, "mcpServers");
-  await addDoc(ref, { name, url, createdAt: serverTimestamp() });
+  await addDoc(ref, {
+    name,
+    url,
+    ...(authHeader ? { authHeader } : {}),
+    tools: tools || [],
+    createdAt: serverTimestamp(),
+  });
 }
 
 export async function deleteMCPServer(uid: string, serverId: string) {
