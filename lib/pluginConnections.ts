@@ -21,6 +21,13 @@ export async function connectPlugin(uid: string, toolId: string) {
   await setDoc(ref, { connectedAt: serverTimestamp() });
 }
 
+/** For the handful of plugins that just need a pasted key/token (Wolfram
+ * Alpha, Perplexity, Zapier, Make) rather than a full OAuth login. */
+export async function connectPluginWithApiKey(uid: string, toolId: string, apiKey: string) {
+  const ref = doc(db, "users", uid, "pluginConnections", toolId);
+  await setDoc(ref, { apiKey, connectedAt: serverTimestamp() });
+}
+
 export async function disconnectPlugin(uid: string, toolId: string) {
   const ref = doc(db, "users", uid, "pluginConnections", toolId);
   await deleteDoc(ref);
