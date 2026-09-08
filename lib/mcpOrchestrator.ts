@@ -78,6 +78,11 @@ function transcript(messages: ChatMessage[], turns = 8): string {
     .join("\n");
 }
 
+function extractJson(text: string): string {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  return (fenced ? fenced[1] : text).trim();
+}
+
 /** Asks the connected AI whether the CONVERSATION (not just the latest
  * message) should trigger one of the user's MCP tools, and with what
  * arguments. Returns null if no tool fits. */
