@@ -1,17 +1,17 @@
 // lib/toolDetect.ts
-// Before answering, checks whether the user's message needs a tool the
-// agent doesn't have direct access to (e.g. "send an email" needs
-// Gmail). If it matches a known plugin, the agent knows whether that
-// plugin is connected. If it doesn't match anything in the plugin
-// catalog, the agent should point the user to MCP Tools instead.
+// Before answering, checks whether the CONVERSATION (not just the latest
+// message) needs an external tool. Using the full recent history here is
+// what fixes multi-turn commands like "draft it" → "now send it" — the
+// old version only looked at the single latest message, so a follow-up
+// like "send it" with no other detail couldn't be matched to anything.
 
-import { sendChatMessage } from "@/lib/chatClient";
+import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
 import { PLUGIN_TOOLS } from "@/lib/plugins";
 
 export type ToolNeed = {
   toolId: string | null;
   toolName: string;
-  known: boolean; // true if it matches something in our plugin catalog
+  known: boolean;
   connected: boolean;
 };
 
@@ -20,18 +20,26 @@ function extractJson(text: string): string {
   return (fenced ? fenced[1] : text).trim();
 }
 
+function transcript(messages: ChatMessage[], turns = 8): string {
+  return messages
+    .slice(-turns)
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+    .join("\n");
+}
+
 export async function detectToolNeed(
   providerId: string,
   apiKey: string,
-  message: string,
+  messages: ChatMessage[],
   connectedToolIds: string[],
   model?: string
 ): Promise<ToolNeed | null> {
   const catalog = PLUGIN_TOOLS.map((t) => `${t.id}: ${t.name} — ${t.description}`).join("\n");
 
-  const prompt = `Decide if answering this message well would require using an external tool/account (like sending an email, checking a calendar, posting a message, looking at a repo, etc.) rather than just knowledge or conversation.
+  const prompt = `Decide if the LATEST message in this conversation would require using an external tool/account (like sending an email, checking a calendar, posting a message, looking at a repo, etc.) rather than just knowledge or conversation. Use the full conversation for context — a short follow-up like "send it" or "now do it" refers back to what was discussed earlier.
 
-Message: "${message}"
+Conversation so far:
+${transcript(messages)}
 
 Known tool catalog (match against these ids if it fits one):
 ${catalog}
