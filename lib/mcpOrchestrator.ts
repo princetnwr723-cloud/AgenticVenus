@@ -5,7 +5,7 @@
 // its tools, then actually calling it.
 
 import { auth } from "@/lib/firebase";
-import { sendChatMessage } from "@/lib/chatClient";
+import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
 import type { MCPServer } from "@/lib/mcp";
 import type { MCPToolInfo } from "@/lib/mcpClient";
 
@@ -71,18 +71,20 @@ export type PlannedToolCall = {
   arguments: Record<string, any>;
 };
 
-function extractJson(text: string): string {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  return (fenced ? fenced[1] : text).trim();
+function transcript(messages: ChatMessage[], turns = 8): string {
+  return messages
+    .slice(-turns)
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+    .join("\n");
 }
 
-/** Asks the connected AI whether this task should trigger one of the
- * user's MCP tools, and with what arguments, based on each tool's real
- * input schema. Returns null if no tool fits. */
+/** Asks the connected AI whether the CONVERSATION (not just the latest
+ * message) should trigger one of the user's MCP tools, and with what
+ * arguments. Returns null if no tool fits. */
 export async function decideMcpToolCall(
   providerId: string,
   apiKey: string,
-  task: string,
+  messages: ChatMessage[],
   servers: MCPServer[],
   model?: string
 ): Promise<PlannedToolCall | null> {
@@ -100,7 +102,7 @@ export async function decideMcpToolCall(
     )
     .join("\n");
 
-  const prompt = `You have access to these MCP tools:\n${catalog}\n\nTask: "${task}"\n\nDecide if one of these tools should be called to help with this task. Reply with ONLY raw JSON, no other text:\n{"useTool": boolean, "serverId": "matching serverId or null", "toolName": "matching tool name or null", "arguments": {"...": "arguments matching that tool's inputSchema, inferred from the task"}}\n\nIf no tool fits, reply {"useTool": false, "serverId": null, "toolName": null, "arguments": {}}.`;
+  const prompt = `You have access to these MCP tools:\n${catalog}\n\nConversation so far (use this for context — a short follow-up like "do it" refers back to details discussed earlier):\n${transcript(messages)}\n\nDecide if one of these tools should be called right now, based on the LATEST message. Reply with ONLY raw JSON, no other text:\n{"useTool": boolean, "serverId": "matching serverId or null", "toolName": "matching tool name or null", "arguments": {"...": "arguments matching that tool's inputSchema, inferred from the whole conversation"}}\n\nIf no tool fits, reply {"useTool": false, "serverId": null, "toolName": null, "arguments": {}}.`;
 
   try {
     const { text } = await sendChatMessage({
