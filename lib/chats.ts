@@ -32,6 +32,7 @@ export type ChatRecord = {
   agentId?: string;
   providerId?: string;
   telegram?: { botToken: string; botUsername: string } | null;
+  ceoMode?: boolean;
 };
 
 export async function listChats(uid: string): Promise<ChatSummary[]> {
@@ -57,7 +58,13 @@ export async function getChat(uid: string, chatId: string): Promise<ChatRecord |
     agentId: data.agentId,
     providerId: data.providerId,
     telegram: data.telegram ?? null,
+    ceoMode: !!data.ceoMode,
   };
+}
+
+export async function setCeoMode(uid: string, chatId: string, enabled: boolean) {
+  const ref = doc(db, "users", uid, "chats", chatId);
+  await updateDoc(ref, { ceoMode: enabled });
 }
 
 function titleFromMessage(message: string): string {
