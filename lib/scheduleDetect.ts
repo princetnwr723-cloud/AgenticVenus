@@ -10,7 +10,7 @@ import { sendChatMessage } from "@/lib/chatClient";
 export type ScheduleIntent = {
   taskMessage: string;
   time: string; // "HH:MM", 24-hour
-  recurrence: "once" | "daily";
+  recurrence: "once" | "hourly" | "daily";
 };
 
 function extractJson(text: string): string {
@@ -29,7 +29,7 @@ export async function detectScheduleIntent(
 Message: "${userMessage}"
 
 Reply with ONLY raw JSON, no other text, in exactly this shape:
-{"isSchedule": boolean, "taskMessage": string, "time": "HH:MM" in 24-hour format, "recurrence": "once" or "daily"}
+{"isSchedule": boolean, "taskMessage": string, "time": "HH:MM" in 24-hour format, "recurrence": "once", "hourly", or "daily"}
 
 If it is not a scheduling request, reply {"isSchedule": false, "taskMessage": "", "time": "", "recurrence": "once"}.`;
 
@@ -45,7 +45,7 @@ If it is not a scheduling request, reply {"isSchedule": false, "taskMessage": ""
     return {
       taskMessage: parsed.taskMessage || userMessage,
       time: parsed.time,
-      recurrence: parsed.recurrence === "daily" ? "daily" : "once",
+      recurrence: parsed.recurrence === "daily" ? "daily" : parsed.recurrence === "hourly" ? "hourly" : "once",
     };
   } catch {
     return null;
