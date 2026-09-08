@@ -23,6 +23,8 @@ type Props = {
   chatId: string | null;
   telegram: ChatRecord["telegram"];
   onTelegramChange: (telegram: ChatRecord["telegram"]) => void;
+  ceoMode: boolean;
+  onCeoModeChange: (enabled: boolean) => void;
 };
 
 export default function SettingsPanel({
@@ -35,6 +37,8 @@ export default function SettingsPanel({
   chatId,
   telegram,
   onTelegramChange,
+  ceoMode,
+  onCeoModeChange,
 }: Props) {
   const [botToken, setBotToken] = useState("");
   const [connecting, setConnecting] = useState(false);
@@ -178,6 +182,41 @@ export default function SettingsPanel({
           </a>{" "}
           on Telegram, send <code>/newbot</code>, and paste the token it
           gives you above.
+        </p>
+      </div>
+
+      {/* CEO Mode */}
+      <div className="mt-8 border-t border-ink/10 pt-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-ink">CEO Mode</h3>
+            <p className="mt-1 max-w-xs text-xs text-ink/50">
+              Every hour, the agent surveys what's connected (email, MCP
+              tools) and takes reasonable action on its own — replying to
+              something important, flagging an issue it finds, etc.
+            </p>
+          </div>
+          <button
+            onClick={() => chatId && onCeoModeChange(!ceoMode)}
+            disabled={!chatId}
+            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 ${
+              ceoMode ? "bg-clay" : "bg-ink/15"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                ceoMode ? "translate-x-5" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </div>
+        {!chatId && (
+          <p className="mt-2 text-xs text-amber-700">Send a message first so this chat is saved.</p>
+        )}
+        <p className="mt-3 text-xs text-ink/35">
+          Only runs while this tab stays open (same as Scheduler) — true
+          background operation while the app is closed needs a server-side
+          cron job, which is a further step.
         </p>
       </div>
     </SlideOverPanel>
