@@ -86,7 +86,7 @@ export default function SchedulerPanel({ uid, open, onClose, hasConnection }: Pr
           className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
         />
         <div className="flex gap-2">
-          {(["once", "daily"] as Recurrence[]).map((r) => (
+          {(["once", "hourly", "daily"] as Recurrence[]).map((r) => (
             <button
               key={r}
               type="button"
@@ -137,9 +137,9 @@ export default function SchedulerPanel({ uid, open, onClose, hasConnection }: Pr
                 <div className="mt-1 flex items-center gap-2 text-xs text-ink/45">
                   <span>{t.runAt.toDate().toLocaleString()}</span>
                   <StatusBadge status={t.status} />
-                  {t.recurrence === "daily" && (
+                  {t.recurrence !== "once" && (
                     <span className="rounded-full bg-moss/15 px-2 py-0.5 text-[10px] font-medium text-moss">
-                      daily
+                      {t.recurrence}
                     </span>
                   )}
                 </div>
