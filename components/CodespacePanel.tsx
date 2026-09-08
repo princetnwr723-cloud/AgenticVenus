@@ -35,8 +35,13 @@ function triggerDownload(blob: Blob, filename: string) {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  a.rel = "noopener";
+  // Safari (especially iOS) won't fire the download unless the anchor is
+  // actually attached to the page when clicked.
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export default function CodespacePanel({ open, onClose, files }: Props) {
@@ -44,6 +49,7 @@ export default function CodespacePanel({ open, onClose, files }: Props) {
   const [viewMode, setViewMode] = useState<"code" | "preview">("code");
   const [copied, setCopied] = useState(false);
   const [zipping, setZipping] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
 
   if (!open) return null;
 
@@ -85,7 +91,9 @@ export default function CodespacePanel({ open, onClose, files }: Props) {
   return (
     <div className="animate-fade-in fixed inset-0 z-40 flex justify-end bg-ink/30" onClick={onClose}>
       <div
-        className="animate-scale-in flex h-full w-full max-w-3xl flex-col bg-[#1e1c19] text-cream shadow-2xl"
+        className={`animate-scale-in flex h-full w-full flex-col bg-[#1e1c19] text-cream shadow-2xl transition-all ${
+          fullscreen ? "max-w-full" : "max-w-3xl"
+        }`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
@@ -119,6 +127,21 @@ export default function CodespacePanel({ open, onClose, files }: Props) {
                 {zipping ? "Zipping..." : "Download all"}
               </button>
             )}
+            <button
+              onClick={() => setFullscreen((f) => !f)}
+              aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+              className="focus-ring rounded-md border border-white/15 p-1.5 text-cream/60 hover:text-cream"
+            >
+              {fullscreen ? (
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M5.5 2H2v3.5M8.5 12H12V8.5M12 2H8.5M2 8.5V12h3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M2 5.5V2h3.5M12 5.5V2H8.5M2 8.5V12h3.5M12 8.5V12H8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </button>
             <button onClick={onClose} aria-label="Close" className="focus-ring rounded-md p-1 text-cream/60 hover:text-cream">
               ✕
             </button>
