@@ -28,7 +28,7 @@ import { db } from "@/lib/firebase";
 import { sendChatMessage } from "@/lib/chatClient";
 import { getChat, saveChatMessages } from "@/lib/chats";
 
-export type Recurrence = "once" | "daily";
+export type Recurrence = "once" | "hourly" | "daily";
 
 export type ScheduledTask = {
   id: string;
@@ -127,9 +127,10 @@ export async function runDueTasks(
         }
       }
 
-      if (task.recurrence === "daily") {
+      if (task.recurrence === "daily" || task.recurrence === "hourly") {
         const next = new Date(task.runAt.toMillis());
-        next.setDate(next.getDate() + 1);
+        if (task.recurrence === "hourly") next.setHours(next.getHours() + 1);
+        else next.setDate(next.getDate() + 1);
         await updateDoc(ref, {
           status: "pending",
           resultText: reply,
