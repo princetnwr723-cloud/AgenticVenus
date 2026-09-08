@@ -12,10 +12,17 @@
 // server route so the request comes from your server, not the user's
 // browser.
 
+export type Attachment = {
+  name: string;
+  mimeType: string;
+  dataUrl: string; // data:<mime>;base64,<data>
+};
+
 export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   usage?: TokenUsage;
+  attachments?: Attachment[];
 };
 
 export type TokenUsage = {
@@ -100,6 +107,40 @@ function toMessages(messages: ChatMessage[]) {
   return messages.map((m) => ({ role: m.role, content: m.content }));
 }
 
+function base64Only(dataUrl: string): string {
+  const idx = dataUrl.indexOf(",");
+  return idx >= 0 ? dataUrl.slice(idx + 1) : dataUrl;
+}
+
+function toAnthropicMessages(messages: ChatMessage[]) {
+  return messages.map((m) => {
+    if (!m.attachments?.length) return { role: m.role, content: m.content };
+    return {
+      role: m.role,
+      content: [
+        ...m.attachments.map((a) => ({
+          type: "image",
+          source: { type: "base64", media_type: a.mimeType, data: base64Only(a.dataUrl) },
+        })),
+        { type: "text", text: m.content || "(see attached image)" },
+      ],
+    };
+  });
+}
+
+function toOpenAiMessages(messages: ChatMessage[]) {
+  return messages.map((m) => {
+    if (!m.attachments?.length) return { role: m.role, content: m.content };
+    return {
+      role: m.role,
+      content: [
+        { type: "text", text: m.content || "(see attached image)" },
+        ...m.attachments.map((a) => ({ type: "image_url", image_url: { url: a.dataUrl } })),
+      ],
+    };
+  });
+}
+
 // ---------- Anthropic (Claude) ----------
 async function callAnthropic(
   apiKey: string, messages: ChatMessage[], systemPrompt?: string, model?: string
@@ -116,7 +157,7 @@ async function callAnthropic(
       model: model || "claude-sonnet-5",
       max_tokens: 1024,
       ...(systemPrompt ? { system: systemPrompt } : {}),
-      messages: toMessages(messages),
+      messages: toAnthropicMessages(messages),
     }),
   });
   const data = await parseOrThrow(res);
@@ -137,7 +178,12 @@ async function callGemini(
 ): Promise<ChatResult> {
   const contents = messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: m.content }],
+    parts: [
+      { text: m.content },
+      ...(m.attachments || []).map((a) => ({
+        inline_data: { mime_type: a.mimeType, data: base64Only(a.dataUrl) },
+      })),
+    ],
   }));
   const body = JSON.stringify({
     contents,
@@ -216,7 +262,7 @@ async function callOpenAiCompatible(
     headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
       model,
-      messages: chatMessages.map((m) => ({ role: m.role, content: m.content })),
+      messages: toOpenAiMessages(chatMessages as ChatMessage[]),
     }),
   });
   const data = await parseOrThrow(res);
