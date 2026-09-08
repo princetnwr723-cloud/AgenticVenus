@@ -17,13 +17,14 @@ import CodespacePanel from "@/components/CodespacePanel";
 import ModelDropdown from "@/components/ModelDropdown";
 import SettingsPanel from "@/components/SettingsPanel";
 import ToolConnectPrompt from "@/components/ToolConnectPrompt";
+import FilesPanel from "@/components/FilesPanel";
 import {
   getPrimaryConnection,
   getAllConnections,
   updateConnectionModel,
   type SavedConnection,
 } from "@/lib/connections";
-import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
+import { sendChatMessage, type ChatMessage, type Attachment } from "@/lib/chatClient";
 import type { Provider } from "@/lib/providers";
 import { classifyAgent, getAgentById, type Agent } from "@/lib/agents";
 import {
@@ -45,6 +46,7 @@ import {
   createChat,
   getChat,
   saveChatMessages,
+  setCeoMode as saveCeoMode,
   type ChatSummary,
   type ChatRecord,
 } from "@/lib/chats";
@@ -84,6 +86,7 @@ export default function HomePage() {
 
   // Tool awareness — a pending prompt to connect a needed tool
   const [toolNeed, setToolNeed] = useState<ToolNeed | null>(null);
+  const [pendingTaskAfterConnect, setPendingTaskAfterConnect] = useState<string | null>(null);
 
   // Chat persistence
   const [chats, setChats] = useState<ChatSummary[]>([]);
@@ -98,6 +101,12 @@ export default function HomePage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
+  const [chatFullscreen, setChatFullscreen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [ceoMode, setCeoMode] = useState(false);
+  const [ceoRunning, setCeoRunning] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -173,14 +182,30 @@ export default function HomePage() {
     if (mcpConnected) {
       setMcpBanner({ type: "success", text: `Connected to ${mcpConnected}.` });
       setMcpOpen(true);
-      listMCPServers(user.uid).then(setMcpServers);
+      listMCPServers(user.uid).then((servers) => {
+        setMcpServers(servers);
+        if (pendingTaskAfterConnect) {
+          const task = pendingTaskAfterConnect;
+          setPendingTaskAfterConnect(null);
+          setMcpOpen(false);
+          processTask(task);
+        }
+      });
     } else if (mcpError) {
       setMcpBanner({ type: "error", text: mcpError });
       setMcpOpen(true);
     } else if (pluginConnected) {
       setMcpBanner({ type: "success", text: `Connected to ${pluginConnected}.` });
       setPluginsOpen(true);
-      listConnectedPluginIds(user.uid).then(setConnectedToolIds);
+      listConnectedPluginIds(user.uid).then((ids) => {
+        setConnectedToolIds(ids);
+        if (pendingTaskAfterConnect) {
+          const task = pendingTaskAfterConnect;
+          setPendingTaskAfterConnect(null);
+          setPluginsOpen(false);
+          processTask(task);
+        }
+      });
     } else if (pluginError) {
       setMcpBanner({ type: "error", text: pluginError });
       setPluginsOpen(true);
@@ -242,6 +267,27 @@ export default function HomePage() {
     return () => clearInterval(interval);
   }, [user, chatId, telegram?.botUsername, messages.length]);
 
+  // CEO Mode: every hour, the agent surveys whatever it has connected
+  // (email, MCP tools, etc.) and takes reasonable action on its own —
+  // reusing the exact same tool-orchestration pipeline as a normal
+  // message (processTask), so it can genuinely act, not just talk.
+  // Like Scheduler, this only runs while this tab is open — true
+  // always-on background execution needs a Vercel Cron job calling the
+  // same logic server-side (see README).
+  useEffect(() => {
+    if (!ceoMode || !chatId || !activeConnection) return;
+    const CEO_SURVEY_PROMPT =
+      "It's time for your regular check-in. Review what you have connected right now (email, any MCP tools, etc.) and see if anything genuinely needs attention or action — for example, an important unread email worth replying to, or something a connected tool surfaces. Take reasonable, safe action on anything that clearly needs it. Then give a short summary of what you found and did. If nothing needs attention, say so briefly — don't invent busywork.";
+    const interval = setInterval(() => {
+      if (!ceoRunning) {
+        setCeoRunning(true);
+        processTask(CEO_SURVEY_PROMPT).finally(() => setCeoRunning(false));
+      }
+    }, 60 * 60 * 1000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ceoMode, chatId, activeConnection?.provider.id]);
+
   if (loading || !user || checkingConnection) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-cream">
@@ -271,6 +317,7 @@ export default function HomePage() {
     setChatId(null);
     setGreeting(null);
     setTelegram(null);
+    setCeoMode(false);
     setToolNeed(null);
     setActiveProviderId(connected?.id ?? null);
   }
@@ -284,6 +331,7 @@ export default function HomePage() {
     setActiveAgent(chat.agentId ? getAgentById(chat.agentId) : null);
     setActiveProviderId(chat.providerId ?? connected?.id ?? null);
     setTelegram(chat.telegram ?? null);
+    setCeoMode(!!chat.ceoMode);
     setToolNeed(null);
     setGreeting(null);
     setError(null);
@@ -314,10 +362,49 @@ export default function HomePage() {
     );
   }
 
+  async function handleFilesSelected(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0) return;
+    const TEXT_TYPES = ["text/plain", "text/markdown", "text/csv", "application/json"];
+    const MAX_SIZE = 800 * 1024; // 800KB — keeps Firestore doc size safe
+
+    for (const file of Array.from(fileList)) {
+      if (file.size > MAX_SIZE) {
+        setError(`"${file.name}" is too large (max ~800KB per file for now).`);
+        continue;
+      }
+      if (file.type.startsWith("image/")) {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        setPendingAttachments((prev) => [...prev, { name: file.name, mimeType: file.type, dataUrl }]);
+      } else if (TEXT_TYPES.includes(file.type) || /\.(txt|md|csv|json)$/i.test(file.name)) {
+        const text = await file.text();
+        setInput((prev) => `${prev}${prev ? "\n\n" : ""}[Attached file: ${file.name}]\n${text}`);
+      } else {
+        setError(`"${file.name}" isn't a supported type yet — images and text files (.txt, .md, .csv, .json) work today.`);
+      }
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function removeAttachment(index: number) {
+    setPendingAttachments((prev) => prev.filter((_, i) => i !== index));
+  }
+
   async function handleSend(e: FormEvent) {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() && pendingAttachments.length === 0) return;
+    const task = input.trim() || "(see attached image)";
+    const attachments = pendingAttachments;
+    setInput("");
+    setPendingAttachments([]);
+    await processTask(task, attachments);
+  }
 
+  async function processTask(task: string, attachments: Attachment[] = []) {
     if (!activeConnection || !user) {
       setForceSelect(true);
       setModalOpen(true);
@@ -325,11 +412,9 @@ export default function HomePage() {
     }
 
     const { provider, apiKey: activeKey, model } = activeConnection;
-    const task = input.trim();
-    const userMessage: ChatMessage = { role: "user", content: task };
+    const userMessage: ChatMessage = { role: "user", content: task, ...(attachments.length ? { attachments } : {}) };
     const nextMessages = [...messages, userMessage];
     setMessages(nextMessages);
-    setInput("");
     setError(null);
     setGreeting(null);
     setToolNeed(null);
@@ -348,7 +433,7 @@ export default function HomePage() {
       const confirmation: ChatMessage = {
         role: "assistant",
         content: `Done — I've scheduled "${intent.taskMessage}" to run ${
-          intent.recurrence === "daily" ? "every day" : "once"
+          intent.recurrence === "daily" ? "every day" : intent.recurrence === "hourly" ? "every hour" : "once"
         } at ${intent.time}. I'll post the result right here in this chat each time it runs (also visible under Scheduler).`,
       };
       const finalMessages = [...nextMessages, confirmation];
@@ -363,9 +448,10 @@ export default function HomePage() {
     // is what stops the agent asking to "connect Gmail in Plugins" when
     // Gmail is already working through MCP.
     const effectiveToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
-    const need = await detectToolNeed(provider.id, activeKey, task, effectiveToolIds, model);
+    const need = await detectToolNeed(provider.id, activeKey, nextMessages, effectiveToolIds, model);
     if (need && !need.connected) {
       setToolNeed(need);
+      setPendingTaskAfterConnect(task);
       await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
       return;
     }
@@ -380,7 +466,7 @@ export default function HomePage() {
     // for real via our server route, and fold the result into the reply.
     let toolResultNote = "";
     if (mcpServers.length > 0) {
-      const toolCall = await decideMcpToolCall(provider.id, activeKey, task, mcpServers, model);
+      const toolCall = await decideMcpToolCall(provider.id, activeKey, nextMessages, mcpServers, model);
       if (toolCall) {
         setUsingMcpTool(toolCall.toolName);
         try {
@@ -399,7 +485,7 @@ export default function HomePage() {
     // (like Gmail via OAuth) — actually send the email / create the
     // draft / etc. instead of just talking about it.
     if (effectiveToolIds.length > 0) {
-      const planned = await decidePluginAction(provider.id, activeKey, task, connectedToolIds, model);
+      const planned = await decidePluginAction(provider.id, activeKey, nextMessages, connectedToolIds, model);
       if (planned) {
         setUsingPluginAction(planned.actionName);
         try {
@@ -454,26 +540,28 @@ export default function HomePage() {
 
   return (
     <main className="flex h-screen overflow-hidden bg-cream">
-      <Sidebar
-        userLabel={user.email ?? user.displayName ?? "Account"}
-        connected={connected}
-        chats={chats}
-        activeChatId={chatId}
-        onSelectChat={handleSelectChat}
-        onNewChat={handleNewChat}
-        onSwitchModel={() => {
-          setForceSelect(false);
-          setModalOpen(true);
-        }}
-        onOpenScheduler={() => setSchedulerOpen(true)}
-        onOpenPlugins={() => {
-          setHighlightToolId(null);
-          setPluginsOpen(true);
-        }}
-        onOpenMCP={() => setMcpOpen(true)}
-        onOpenBusinessDNA={() => setBusinessOpen(true)}
-        onLogout={() => signOut(auth)}
-      />
+      {!chatFullscreen && (
+        <Sidebar
+          userLabel={user.email ?? user.displayName ?? "Account"}
+          connected={connected}
+          chats={chats}
+          activeChatId={chatId}
+          onSelectChat={handleSelectChat}
+          onNewChat={handleNewChat}
+          onSwitchModel={() => {
+            setForceSelect(false);
+            setModalOpen(true);
+          }}
+          onOpenScheduler={() => setSchedulerOpen(true)}
+          onOpenPlugins={() => {
+            setHighlightToolId(null);
+            setPluginsOpen(true);
+          }}
+          onOpenMCP={() => setMcpOpen(true)}
+          onOpenBusinessDNA={() => setBusinessOpen(true)}
+          onLogout={() => signOut(auth)}
+        />
+      )}
 
       <section className="flex min-w-0 flex-1 flex-col">
         {/* Top bar */}
@@ -500,6 +588,30 @@ export default function HomePage() {
                 Codespace
               </button>
             )}
+            <button
+              onClick={() => setFilesOpen(true)}
+              aria-label="Files"
+              className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="M2 3.5A1.5 1.5 0 013.5 2h2.6l1.2 1.4H10.5A1.5 1.5 0 0112 4.9v6.6A1.5 1.5 0 0110.5 13h-7A1.5 1.5 0 012 11.5v-8z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button
+              onClick={() => setChatFullscreen((f) => !f)}
+              aria-label={chatFullscreen ? "Exit fullscreen" : "Fullscreen chat"}
+              className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+            >
+              {chatFullscreen ? (
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M5.5 2H2v3.5M8.5 12H12V8.5M12 2H8.5M2 8.5V12h3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M2 5.5V2h3.5M12 5.5V2H8.5M2 8.5V12h3.5M12 8.5V12H8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </button>
             <button
               onClick={() => setSettingsOpen(true)}
               aria-label="Settings"
@@ -593,10 +705,41 @@ export default function HomePage() {
 
         {/* Composer */}
         <div className="border-t border-black/5 bg-cream px-6 py-4">
+          {pendingAttachments.length > 0 && (
+            <div className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
+              {pendingAttachments.map((a, i) => (
+                <div key={i} className="flex items-center gap-2 rounded-md border border-ink/10 bg-white px-2 py-1.5">
+                  <img src={a.dataUrl} alt={a.name} className="h-8 w-8 rounded object-cover" />
+                  <span className="max-w-[120px] truncate text-xs text-ink/60">{a.name}</span>
+                  <button onClick={() => removeAttachment(i)} className="text-ink/40 hover:text-red-600">
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <form
             onSubmit={handleSend}
             className="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border border-ink/10 bg-white px-3 py-2 shadow-sm transition-shadow focus-within:shadow-md"
           >
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*,.txt,.md,.csv,.json"
+              className="hidden"
+              onChange={(e) => handleFilesSelected(e.target.files)}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              aria-label="Attach file or image"
+              className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink/50 transition-colors hover:bg-sand hover:text-ink"
+            >
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <path d="M9 2v14M2 9h14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            </button>
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -616,7 +759,7 @@ export default function HomePage() {
             />
             <button
               type="submit"
-              disabled={!input.trim() || sending}
+              disabled={(!input.trim() && pendingAttachments.length === 0) || sending}
               aria-label="Send message"
               className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-cream transition-all hover:scale-105 disabled:cursor-not-allowed disabled:opacity-30"
             >
@@ -682,6 +825,12 @@ export default function HomePage() {
         onClose={() => setCodespaceOpen(false)}
         files={codeFiles}
       />
+      <FilesPanel
+        uid={user.uid}
+        open={filesOpen}
+        onClose={() => setFilesOpen(false)}
+        onOpenChat={handleSelectChat}
+      />
       <SettingsPanel
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
@@ -696,6 +845,11 @@ export default function HomePage() {
         chatId={chatId}
         telegram={telegram}
         onTelegramChange={setTelegram}
+        ceoMode={ceoMode}
+        onCeoModeChange={(enabled) => {
+          setCeoMode(enabled);
+          if (user && chatId) saveCeoMode(user.uid, chatId, enabled);
+        }}
       />
     </main>
   );
