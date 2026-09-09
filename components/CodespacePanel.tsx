@@ -10,13 +10,15 @@
 
 import { useState } from "react";
 import type { CodeFile } from "@/lib/codeExtract";
-import { buildPreviewHtml } from "@/lib/preview";
+import type { Attachment } from "@/lib/chatClient";
+import { buildPreviewHtml, listHtmlPages } from "@/lib/preview";
 import { highlightCode } from "@/lib/syntaxHighlight";
 
 type Props = {
   open: boolean;
   onClose: () => void;
   files: CodeFile[];
+  assets?: Attachment[];
 };
 
 function groupByFolder(files: CodeFile[]): Map<string, CodeFile[]> {
@@ -44,17 +46,19 @@ function triggerDownload(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export default function CodespacePanel({ open, onClose, files }: Props) {
+export default function CodespacePanel({ open, onClose, files, assets = [] }: Props) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"code" | "preview">("code");
   const [copied, setCopied] = useState(false);
   const [zipping, setZipping] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [previewPage, setPreviewPage] = useState<string | null>(null);
 
   if (!open) return null;
 
   const active = files.find((f) => f.id === activeId) ?? files[files.length - 1];
-  const previewHtml = buildPreviewHtml(files);
+  const htmlPages = listHtmlPages(files);
+  const previewHtml = buildPreviewHtml(files, assets, previewPage || undefined);
   const grouped = groupByFolder(files);
 
   async function handleCopy() {
@@ -154,12 +158,33 @@ export default function CodespacePanel({ open, onClose, files }: Props) {
             Ask it to build something and files will show up here.
           </div>
         ) : viewMode === "preview" && previewHtml ? (
-          <iframe
-            title="Codespace preview"
-            srcDoc={previewHtml}
-            sandbox="allow-scripts allow-modals allow-forms"
-            className="h-full w-full flex-1 border-0 bg-white"
-          />
+          <div className="flex h-full w-full flex-1 flex-col">
+            {htmlPages.length > 1 && (
+              <div className="flex items-center gap-2 border-b border-white/10 bg-[#1e1c19] px-4 py-2">
+                <span className="text-xs text-cream/50">Page:</span>
+                <select
+                  value={previewPage || htmlPages.find((p) => /index\.html$/i.test(p)) || htmlPages[0]}
+                  onChange={(e) => setPreviewPage(e.target.value)}
+                  className="rounded-md border border-white/15 bg-[#2a2723] px-2 py-1 text-xs text-cream outline-none"
+                >
+                  {htmlPages.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-xs text-cream/30">
+                  Links between pages won't navigate here (no real server) — switch pages with this dropdown instead.
+                </span>
+              </div>
+            )}
+            <iframe
+              title="Codespace preview"
+              srcDoc={previewHtml}
+              sandbox="allow-scripts allow-modals allow-forms"
+              className="h-full w-full flex-1 border-0 bg-white"
+            />
+          </div>
         ) : (
           <div className="flex flex-1 overflow-hidden">
             <div className="w-56 shrink-0 overflow-y-auto border-r border-white/10 py-2">
