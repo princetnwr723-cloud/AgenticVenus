@@ -365,6 +365,7 @@ export default function HomePage() {
   async function handleFilesSelected(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
     const TEXT_TYPES = ["text/plain", "text/markdown", "text/csv", "application/json"];
+    const ASSET_EXT = /\.(glb|gltf|obj|mtl|fbx|stl|bin)$/i;
     const MAX_SIZE = 800 * 1024; // 800KB — keeps Firestore doc size safe
 
     for (const file of Array.from(fileList)) {
@@ -380,11 +381,24 @@ export default function HomePage() {
           reader.readAsDataURL(file);
         });
         setPendingAttachments((prev) => [...prev, { name: file.name, mimeType: file.type, dataUrl }]);
+      } else if (ASSET_EXT.test(file.name)) {
+        // 3D models and similar binary assets — the AI can't "see" these
+        // (no model reads raw mesh data), but they get made available to
+        // whatever Three.js code the Developer Agent writes, via
+        // window.AGENTICVENUS_ASSETS in the Codespace preview.
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        setPendingAttachments((prev) => [...prev, { name: file.name, mimeType: file.type || "application/octet-stream", dataUrl }]);
+        setInput((prev) => `${prev}${prev ? "\n\n" : ""}[Attached 3D asset: ${file.name} — load it via window.AGENTICVENUS_ASSETS['${file.name}'] in the preview]`);
       } else if (TEXT_TYPES.includes(file.type) || /\.(txt|md|csv|json)$/i.test(file.name)) {
         const text = await file.text();
         setInput((prev) => `${prev}${prev ? "\n\n" : ""}[Attached file: ${file.name}]\n${text}`);
       } else {
-        setError(`"${file.name}" isn't a supported type yet — images and text files (.txt, .md, .csv, .json) work today.`);
+        setError(`"${file.name}" isn't a supported type yet — images, 3D assets (.glb/.gltf/.obj), and text files (.txt, .md, .csv, .json) work today.`);
       }
     }
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -537,6 +551,7 @@ export default function HomePage() {
   }
 
   const codeFiles = extractCodeFiles(messages);
+  const chatAssets = messages.flatMap((m) => m.attachments || []);
 
   return (
     <main className="flex h-screen overflow-hidden bg-cream">
@@ -726,7 +741,7 @@ export default function HomePage() {
               ref={fileInputRef}
               type="file"
               multiple
-              accept="image/*,.txt,.md,.csv,.json"
+              accept="image/*,.txt,.md,.csv,.json,.glb,.gltf,.obj,.mtl,.fbx,.stl"
               className="hidden"
               onChange={(e) => handleFilesSelected(e.target.files)}
             />
@@ -824,6 +839,7 @@ export default function HomePage() {
         open={codespaceOpen}
         onClose={() => setCodespaceOpen(false)}
         files={codeFiles}
+        assets={chatAssets}
       />
       <FilesPanel
         uid={user.uid}
