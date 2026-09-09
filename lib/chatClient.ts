@@ -114,11 +114,12 @@ function base64Only(dataUrl: string): string {
 
 function toAnthropicMessages(messages: ChatMessage[]) {
   return messages.map((m) => {
-    if (!m.attachments?.length) return { role: m.role, content: m.content };
+    const images = (m.attachments || []).filter((a) => a.mimeType.startsWith("image/"));
+    if (images.length === 0) return { role: m.role, content: m.content };
     return {
       role: m.role,
       content: [
-        ...m.attachments.map((a) => ({
+        ...images.map((a) => ({
           type: "image",
           source: { type: "base64", media_type: a.mimeType, data: base64Only(a.dataUrl) },
         })),
@@ -130,12 +131,13 @@ function toAnthropicMessages(messages: ChatMessage[]) {
 
 function toOpenAiMessages(messages: ChatMessage[]) {
   return messages.map((m) => {
-    if (!m.attachments?.length) return { role: m.role, content: m.content };
+    const images = (m.attachments || []).filter((a) => a.mimeType.startsWith("image/"));
+    if (images.length === 0) return { role: m.role, content: m.content };
     return {
       role: m.role,
       content: [
         { type: "text", text: m.content || "(see attached image)" },
-        ...m.attachments.map((a) => ({ type: "image_url", image_url: { url: a.dataUrl } })),
+        ...images.map((a) => ({ type: "image_url", image_url: { url: a.dataUrl } })),
       ],
     };
   });
@@ -180,9 +182,9 @@ async function callGemini(
     role: m.role === "assistant" ? "model" : "user",
     parts: [
       { text: m.content },
-      ...(m.attachments || []).map((a) => ({
-        inline_data: { mime_type: a.mimeType, data: base64Only(a.dataUrl) },
-      })),
+      ...(m.attachments || [])
+        .filter((a) => a.mimeType.startsWith("image/"))
+        .map((a) => ({ inline_data: { mime_type: a.mimeType, data: base64Only(a.dataUrl) } })),
     ],
   }));
   const body = JSON.stringify({
