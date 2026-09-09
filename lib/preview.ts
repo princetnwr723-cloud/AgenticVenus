@@ -1,36 +1,79 @@
 // lib/preview.ts
 // Builds a single, self-contained HTML document out of whatever code
 // files the Developer Agent has written, so Codespace can show a live
-// preview regardless of project type:
-//  - an HTML file (+ any CSS/JS) → served as-is with styles/scripts inlined
-//  - React/JSX/TSX with no HTML → wrapped in a React + Babel CDN shell
-//  - CSS/JS only → shown in a minimal shell
-//  - anything else (e.g. Python-only) → no live preview is possible
+// preview — HTML/CSS/JS as a real page, React/JSX via a React+Babel CDN
+// shell, and Three.js/3D scenes via a Three.js CDN shell. Any binary
+// assets the user attached (3D models, textures) get baked into the
+// preview as `window.AGENTICVENUS_ASSETS['filename']` blob URLs, so code
+// like `new THREE.GLTFLoader().load(window.AGENTICVENUS_ASSETS['x.glb'])`
+// actually works with the user's real uploaded file.
 
 import type { CodeFile } from "@/lib/codeExtract";
+import type { Attachment } from "@/lib/chatClient";
 
 function extOf(file: CodeFile): string {
   const match = file.filename.match(/\.(\w+)$/);
   return (match ? match[1] : file.language).toLowerCase();
 }
 
-export function buildPreviewHtml(files: CodeFile[]): string | null {
+function assetsScript(assets: Attachment[]): string {
+  if (assets.length === 0) return "";
+  const entries = assets
+    .map((a) => `  "${a.name}": ${JSON.stringify(a.dataUrl)}`)
+    .join(",\n");
+  return `<script>
+window.AGENTICVENUS_ASSETS = (function() {
+  const dataUrls = {\n${entries}\n  };
+  const out = {};
+  for (const name in dataUrls) {
+    try {
+      const [meta, b64] = dataUrls[name].split(",");
+      const mime = meta.match(/data:(.*?);base64/)[1];
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      out[name] = URL.createObjectURL(new Blob([bytes], { type: mime }));
+    } catch (e) { console.error("Failed to load asset", name, e); }
+  }
+  return out;
+})();
+</script>`;
+}
+
+/** Optionally pass `pageFilename` to pick which HTML file to render when
+ * the project has more than one (a multi-page site). Defaults to
+ * index.html, or the first HTML file found. */
+export function buildPreviewHtml(
+  files: CodeFile[],
+  assets: Attachment[] = [],
+  pageFilename?: string
+): string | null {
   if (files.length === 0) return null;
 
   const byExt = (exts: string[]) => files.filter((f) => exts.includes(extOf(f)));
-  const htmlFile = files.find((f) => extOf(f) === "html");
+  const htmlFiles = byExt(["html"]);
+  const htmlFile = pageFilename
+    ? htmlFiles.find((f) => f.filename === pageFilename)
+    : htmlFiles.find((f) => /index\.html$/i.test(f.filename)) || htmlFiles[0];
   const cssFiles = byExt(["css"]);
   const jsFiles = byExt(["js"]);
   const jsxFiles = byExt(["jsx", "tsx"]);
 
   const cssBlock = cssFiles.map((f) => `<style>\n${f.code}\n</style>`).join("\n");
   const jsBlock = jsFiles.map((f) => `<script>\n${f.code}\n</script>`).join("\n");
+  const assetsBlock = assetsScript(assets);
+
+  const allCode = files.map((f) => f.code).join("\n");
+  const usesThree = /THREE\.|GLTFLoader|OrbitControls/i.test(allCode);
+  const threeScripts = usesThree
+    ? '<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>\n<script src="https://unpkg.com/three@0.160.0/examples/js/loaders/GLTFLoader.js"></script>\n<script src="https://unpkg.com/three@0.160.0/examples/js/controls/OrbitControls.js"></script>'
+    : "";
 
   if (htmlFile) {
     let base = htmlFile.code;
     base = base.includes("</head>")
-      ? base.replace("</head>", `${cssBlock}\n</head>`)
-      : cssBlock + base;
+      ? base.replace("</head>", `${threeScripts}\n${assetsBlock}\n${cssBlock}\n</head>`)
+      : threeScripts + assetsBlock + cssBlock + base;
     base = base.includes("</body>")
       ? base.replace("</body>", `${jsBlock}\n</body>`)
       : base + jsBlock;
@@ -47,6 +90,8 @@ export function buildPreviewHtml(files: CodeFile[]): string | null {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
+${threeScripts}
+${assetsBlock}
 ${cssBlock}
 </head>
 <body>
@@ -71,13 +116,21 @@ ${jsBlock}
   if (cssFiles.length > 0 || jsFiles.length > 0) {
     return `<!DOCTYPE html>
 <html>
-<head>${cssBlock}</head>
-<body>
-<div style="font-family:sans-serif;padding:20px;color:#888">Preview of styles/script — add an HTML file for a full page preview.</div>
+<head>
+${threeScripts}
+${assetsBlock}
+${cssBlock}
+</head>
+<body style="margin:0">
 ${jsBlock}
 </body>
 </html>`;
   }
 
   return null;
+}
+
+/** Lists every HTML file in the project, for a multi-page selector. */
+export function listHtmlPages(files: CodeFile[]): string[] {
+  return files.filter((f) => f.filename.toLowerCase().endsWith(".html")).map((f) => f.filename);
 }
