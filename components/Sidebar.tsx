@@ -17,6 +17,8 @@ type Props = {
   onOpenPlugins: () => void;
   onOpenMCP: () => void;
   onOpenBusinessDNA: () => void;
+  onOpenSkills: () => void;
+  onOpenPricing: () => void;
   onLogout: () => void;
   chats: ChatSummary[];
   activeChatId: string | null;
@@ -32,6 +34,8 @@ export default function Sidebar({
   onOpenPlugins,
   onOpenMCP,
   onOpenBusinessDNA,
+  onOpenSkills,
+  onOpenPricing,
   onLogout,
   chats,
   activeChatId,
@@ -63,7 +67,9 @@ export default function Sidebar({
         <NavItem icon={<SchedulerIcon />} label="Scheduler" onClick={onOpenScheduler} />
         <NavItem icon={<PluginIcon />} label="Plugins" onClick={onOpenPlugins} />
         <NavItem icon={<MCPIcon />} label="MCP Tools" onClick={onOpenMCP} />
+        <NavItem icon={<SkillIcon />} label="Skills" onClick={onOpenSkills} />
         <NavItem icon={<BusinessIcon />} label="Business DNA" onClick={onOpenBusinessDNA} />
+        <NavItem icon={<PlanIcon />} label="Plans" onClick={onOpenPricing} />
       </div>
 
       <div className="mt-5 flex-1 overflow-y-auto px-3">
@@ -177,6 +183,23 @@ function BusinessIcon() {
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
       <rect x="3" y="6" width="9" height="6.5" rx="1" stroke="currentColor" strokeWidth="1.2" />
       <path d="M5.5 6V4a2 2 0 012-2h0a2 2 0 012 2v2" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+function SkillIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <path d="M7.5 2l1.5 3 3.3.5-2.4 2.3.6 3.3-2.9-1.6-2.9 1.6.6-3.3-2.4-2.3 3.3-.5z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function PlanIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <rect x="2" y="3" width="11" height="9" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M2 6h11" stroke="currentColor" strokeWidth="1.2" />
     </svg>
   );
 }
