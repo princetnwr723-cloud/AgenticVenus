@@ -27,6 +27,12 @@ import {
 import { sendChatMessage, type ChatMessage, type Attachment } from "@/lib/chatClient";
 import type { Provider } from "@/lib/providers";
 import { classifyAgent, getAgentById, type Agent } from "@/lib/agents";
+import { getAgentLessons, buildLessonsContext, reflectAndLearn } from "@/lib/agentMemory";
+import SkillsPanel from "@/components/SkillsPanel";
+import PricingPanel from "@/components/PricingPanel";
+import { listInstalledSkillIds, buildInstalledSkillsContext } from "@/lib/skillConnections";
+import { getUserPlanId, canSendMessage, incrementTodayUsage } from "@/lib/userPlan";
+import { getPlan, type PlanId } from "@/lib/plans";
 import {
   getBusinessDNA,
   buildBusinessContext,
@@ -107,6 +113,11 @@ export default function HomePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [ceoMode, setCeoMode] = useState(false);
   const [ceoRunning, setCeoRunning] = useState(false);
+  const [installedSkillIds, setInstalledSkillIds] = useState<string[]>([]);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [pricingOpen, setPricingOpen] = useState(false);
+  const [planId, setPlanId] = useState<PlanId>("free");
+  const [usageLimitError, setUsageLimitError] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -129,12 +140,14 @@ export default function HomePage() {
     if (!user) return;
     (async () => {
       try {
-        const [existing, allConns, dna, toolIds, servers] = await Promise.all([
+        const [existing, allConns, dna, toolIds, servers, skillIds, userPlanId] = await Promise.all([
           getPrimaryConnection(user.uid),
           getAllConnections(user.uid),
           getBusinessDNA(user.uid),
           listConnectedPluginIds(user.uid),
           listMCPServers(user.uid),
+          listInstalledSkillIds(user.uid),
+          getUserPlanId(user.uid),
         ]);
         setConnections(allConns);
         if (existing) {
@@ -148,6 +161,8 @@ export default function HomePage() {
         setBusinessDNA(dna);
         setConnectedToolIds(toolIds);
         setMcpServers(servers);
+        setInstalledSkillIds(skillIds);
+        setPlanId(userPlanId);
         await refreshChats();
       } catch (err) {
         console.error("[home] failed to load workspace data:", err);
@@ -425,6 +440,16 @@ export default function HomePage() {
       return;
     }
 
+    const usageCheck = await canSendMessage(user.uid);
+    if (!usageCheck.allowed) {
+      setUsageLimitError(
+        `You've hit your plan's daily limit (${usageCheck.used}/${usageCheck.limit} messages today). Upgrade for more.`
+      );
+      setPricingOpen(true);
+      return;
+    }
+    setUsageLimitError(null);
+
     const { provider, apiKey: activeKey, model } = activeConnection;
     const userMessage: ChatMessage = { role: "user", content: task, ...(attachments.length ? { attachments } : {}) };
     const nextMessages = [...messages, userMessage];
@@ -515,17 +540,22 @@ export default function HomePage() {
     }
 
     // 2. The chosen specialist answers for real — with Business DNA, its
-    // connected-tools awareness, and any MCP tool result layered in.
+    // connected-tools awareness, any MCP tool result, and lessons it has
+    // learned from past tasks (this is what makes it self-improving).
     setSending(true);
     const toolNames = connectedToolNames(effectiveToolIds);
     const toolsContext =
       toolNames.length > 0
         ? `You currently have access to these connected tools: ${toolNames.join(", ")}. If asked to do something with one of them, answer as if you used it. If asked to do something requiring a tool NOT in this list, tell the user they can connect it in Plugins, or through MCP Tools if it's not a built-in plugin.`
         : "You don't have any tools connected yet. If a request needs an external tool (email, calendar, etc.), tell the user to connect it in Plugins or MCP Tools.";
+    const installedSkillsContext = buildInstalledSkillsContext(installedSkillIds);
+    const lessons = await getAgentLessons(user.uid, agent.id);
     const systemPrompt = [
       agent.systemPrompt,
       buildBusinessContext(businessDNA),
       toolsContext,
+      installedSkillsContext,
+      buildLessonsContext(lessons),
       toolResultNote,
       "Formatting: use **bold** around the genuinely important parts of your answer — key numbers, names, decisions, or action items — so they stand out. Don't bold everything; be selective. Use markdown lists and short paragraphs where that helps readability.",
     ]
@@ -543,6 +573,9 @@ export default function HomePage() {
       const finalMessages = [...nextMessages, { role: "assistant" as const, content: text, usage }];
       setMessages(finalMessages);
       await persist(finalMessages, currentChatId, agent.id, provider.id);
+      await incrementTodayUsage(user.uid);
+      // Self-improvement — reflect in the background, never blocks the reply.
+      reflectAndLearn(user.uid, agent.id, provider.id, activeKey, task, text, model);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -574,6 +607,8 @@ export default function HomePage() {
           }}
           onOpenMCP={() => setMcpOpen(true)}
           onOpenBusinessDNA={() => setBusinessOpen(true)}
+          onOpenSkills={() => setSkillsOpen(true)}
+          onOpenPricing={() => setPricingOpen(true)}
           onLogout={() => signOut(auth)}
         />
       )}
@@ -657,6 +692,17 @@ export default function HomePage() {
                 }`}
               >
                 {mcpBanner.text}
+              </div>
+            )}
+            {usageLimitError && (
+              <div className="animate-fade-in-up flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+                <span>{usageLimitError}</span>
+                <button
+                  onClick={() => setPricingOpen(true)}
+                  className="shrink-0 rounded-md bg-clay px-3 py-1 text-xs font-medium text-cream hover:bg-clay-dark"
+                >
+                  Upgrade
+                </button>
               </div>
             )}
             {messages.length === 0 && (
@@ -815,6 +861,12 @@ export default function HomePage() {
           setPluginsOpen(false);
           setMcpOpen(true);
         }}
+        maxAllowed={getPlan(planId).maxPluginsAndMcp}
+        currentTotal={connectedToolIds.length + mcpServers.length}
+        onUpgrade={() => {
+          setPluginsOpen(false);
+          setPricingOpen(true);
+        }}
       />
       <MCPPanel
         uid={user.uid}
@@ -842,10 +894,26 @@ export default function HomePage() {
         assets={chatAssets}
       />
       <FilesPanel
-        uid={user.uid}
         open={filesOpen}
         onClose={() => setFilesOpen(false)}
-        onOpenChat={handleSelectChat}
+        messages={messages}
+      />
+      <SkillsPanel
+        uid={user.uid}
+        open={skillsOpen}
+        onClose={() => setSkillsOpen(false)}
+        onInstalledChange={setInstalledSkillIds}
+        onUpgrade={() => {
+          setSkillsOpen(false);
+          setPricingOpen(true);
+        }}
+      />
+      <PricingPanel
+        uid={user.uid}
+        open={pricingOpen}
+        onClose={() => setPricingOpen(false)}
+        currentPlanId={planId}
+        onPlanChange={setPlanId}
       />
       <SettingsPanel
         open={settingsOpen}
