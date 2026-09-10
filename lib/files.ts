@@ -1,34 +1,27 @@
 // lib/files.ts
-// Collects everything that should show up in the Files panel — both
-// files the user uploaded (images, 3D assets) AND files the agent itself
-// wrote in Codespace — across every one of the user's saved chats, the
-// way Claude's Files view brings everything into one place.
+// Files for the Files panel — scoped to ONE chat only, not every chat.
+// Uploads (images, 3D assets) come from that chat's own messages;
+// generated files come from whatever the Developer Agent wrote in that
+// same chat. A different chat's files never show up here.
 
-import { listChats, getChat } from "@/lib/chats";
-import type { Attachment } from "@/lib/chatClient";
+import type { ChatMessage, Attachment } from "@/lib/chatClient";
 import { extractCodeFiles, type CodeFile } from "@/lib/codeExtract";
 
 export type FileEntry =
-  | { kind: "upload"; chatId: string; chatTitle: string; attachment: Attachment }
-  | { kind: "generated"; chatId: string; chatTitle: string; file: CodeFile };
+  | { kind: "upload"; attachment: Attachment }
+  | { kind: "generated"; file: CodeFile };
 
-export async function listAllFiles(uid: string): Promise<FileEntry[]> {
-  const summaries = await listChats(uid);
+export function filesFromMessages(messages: ChatMessage[]): FileEntry[] {
   const entries: FileEntry[] = [];
 
-  for (const summary of summaries) {
-    const chat = await getChat(uid, summary.id);
-    if (!chat) continue;
-
-    for (const message of chat.messages) {
-      for (const attachment of message.attachments || []) {
-        entries.push({ kind: "upload", chatId: chat.id, chatTitle: chat.title, attachment });
-      }
+  for (const message of messages) {
+    for (const attachment of message.attachments || []) {
+      entries.push({ kind: "upload", attachment });
     }
+  }
 
-    for (const file of extractCodeFiles(chat.messages)) {
-      entries.push({ kind: "generated", chatId: chat.id, chatTitle: chat.title, file });
-    }
+  for (const file of extractCodeFiles(messages)) {
+    entries.push({ kind: "generated", file });
   }
 
   return entries;
