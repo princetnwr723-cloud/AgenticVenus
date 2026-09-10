@@ -13,6 +13,7 @@ import type { CodeFile } from "@/lib/codeExtract";
 import type { Attachment } from "@/lib/chatClient";
 import { buildPreviewHtml, listHtmlPages } from "@/lib/preview";
 import { highlightCode } from "@/lib/syntaxHighlight";
+import { startCloudPreview, stopCloudPreview } from "@/lib/sandboxClient";
 
 type Props = {
   open: boolean;
@@ -53,6 +54,10 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
   const [zipping, setZipping] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [previewPage, setPreviewPage] = useState<string | null>(null);
+  const [cloudUrl, setCloudUrl] = useState<string | null>(null);
+  const [cloudSandboxId, setCloudSandboxId] = useState<string | null>(null);
+  const [cloudLoading, setCloudLoading] = useState(false);
+  const [cloudError, setCloudError] = useState<string | null>(null);
 
   if (!open) return null;
 
@@ -72,7 +77,30 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
     }
   }
 
-  function handleDownloadFile() {
+  async function handleRunInCloud() {
+    if (files.length === 0) return;
+    setCloudLoading(true);
+    setCloudError(null);
+    if (cloudSandboxId) await stopCloudPreview(cloudSandboxId);
+    try {
+      const { sandboxId, previewUrl } = await startCloudPreview(files);
+      setCloudSandboxId(sandboxId);
+      setCloudUrl(previewUrl);
+      setViewMode("preview");
+    } catch (err) {
+      setCloudError(err instanceof Error ? err.message : "Failed to start the cloud sandbox.");
+    } finally {
+      setCloudLoading(false);
+    }
+  }
+
+  function handleCloseCloud() {
+    if (cloudSandboxId) stopCloudPreview(cloudSandboxId);
+    setCloudSandboxId(null);
+    setCloudUrl(null);
+  }
+
+  async function handleDownloadFile() {
     if (!active) return;
     const safeName = active.filename.split("/").pop() || active.filename;
     triggerDownload(new Blob([active.code], { type: "text/plain" }), safeName);
@@ -106,7 +134,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
             <h2 className="text-sm font-medium">Codespace — Developer Agent</h2>
           </div>
           <div className="flex items-center gap-2">
-            {previewHtml && files.length > 0 && (
+            {(previewHtml || cloudUrl) && files.length > 0 && (
               <div className="flex overflow-hidden rounded-md border border-white/15 text-xs">
                 <button
                   onClick={() => setViewMode("code")}
@@ -121,6 +149,15 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
                   Preview
                 </button>
               </div>
+            )}
+            {files.length > 0 && (
+              <button
+                onClick={handleRunInCloud}
+                disabled={cloudLoading}
+                className="focus-ring rounded-md border border-clay/30 bg-clay/10 px-2.5 py-1 text-xs font-medium text-clay transition-colors hover:bg-clay/20 disabled:opacity-50"
+              >
+                {cloudLoading ? "Starting sandbox..." : cloudUrl ? "Restart in Cloud" : "Run in Cloud"}
+              </button>
             )}
             {files.length > 0 && (
               <button
@@ -157,31 +194,44 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
             The Developer Agent hasn&apos;t written any code in this chat yet.
             Ask it to build something and files will show up here.
           </div>
-        ) : viewMode === "preview" && previewHtml ? (
+        ) : viewMode === "preview" && (cloudUrl || previewHtml) ? (
           <div className="flex h-full w-full flex-1 flex-col">
-            {htmlPages.length > 1 && (
+            {cloudUrl ? (
               <div className="flex items-center gap-2 border-b border-white/10 bg-[#1e1c19] px-4 py-2">
-                <span className="text-xs text-cream/50">Page:</span>
-                <select
-                  value={previewPage || htmlPages.find((p) => /index\.html$/i.test(p)) || htmlPages[0]}
-                  onChange={(e) => setPreviewPage(e.target.value)}
-                  className="rounded-md border border-white/15 bg-[#2a2723] px-2 py-1 text-xs text-cream outline-none"
-                >
-                  {htmlPages.map((p) => (
-                    <option key={p} value={p}>
-                      {p}
-                    </option>
-                  ))}
-                </select>
-                <span className="text-xs text-cream/30">
-                  Links between pages won't navigate here (no real server) — switch pages with this dropdown instead.
-                </span>
+                <span className="h-1.5 w-1.5 rounded-full bg-moss" />
+                <span className="text-xs text-cream/60">Live cloud sandbox — real server, any language</span>
+                <a href={cloudUrl} target="_blank" rel="noreferrer" className="text-xs text-clay hover:underline">
+                  Open in new tab
+                </a>
+                <button onClick={handleCloseCloud} className="ml-auto text-xs text-cream/40 hover:text-cream">
+                  Stop sandbox
+                </button>
               </div>
+            ) : (
+              htmlPages.length > 1 && (
+                <div className="flex items-center gap-2 border-b border-white/10 bg-[#1e1c19] px-4 py-2">
+                  <span className="text-xs text-cream/50">Page:</span>
+                  <select
+                    value={previewPage || htmlPages.find((p) => /index\.html$/i.test(p)) || htmlPages[0]}
+                    onChange={(e) => setPreviewPage(e.target.value)}
+                    className="rounded-md border border-white/15 bg-[#2a2723] px-2 py-1 text-xs text-cream outline-none"
+                  >
+                    {htmlPages.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-cream/30">
+                    Links between pages won't navigate here (no real server) — switch pages with this dropdown instead.
+                  </span>
+                </div>
+              )
             )}
             <iframe
               title="Codespace preview"
-              srcDoc={previewHtml}
-              sandbox="allow-scripts allow-modals allow-forms"
+              {...(cloudUrl ? { src: cloudUrl } : { srcDoc: previewHtml! })}
+              sandbox="allow-scripts allow-modals allow-forms allow-same-origin"
               className="h-full w-full flex-1 border-0 bg-white"
             />
           </div>
@@ -240,10 +290,12 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
           </div>
         )}
 
-        {files.length > 0 && !previewHtml && viewMode === "code" && (
+        {cloudError && (
+          <p className="border-t border-white/10 bg-red-950/40 px-5 py-2 text-xs text-red-300">{cloudError}</p>
+        )}
+        {files.length > 0 && !previewHtml && !cloudUrl && viewMode === "code" && (
           <p className="border-t border-white/10 px-5 py-2 text-xs text-cream/35">
-            No live preview available for this file type yet — preview works
-            for HTML/CSS/JS and React (JSX/TSX) projects.
+            No static preview for this file type — click <strong className="text-clay">Run in Cloud</strong> above to run it for real in a live sandbox instead (works for any language).
           </p>
         )}
       </div>
