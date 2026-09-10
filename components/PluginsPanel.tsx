@@ -23,6 +23,9 @@ type Props = {
   highlightToolId?: string | null;
   onConnectionsChange?: (connectedIds: string[]) => void;
   onOpenMcpWithPrefill?: (name: string, url: string) => void;
+  maxAllowed: number;
+  currentTotal: number;
+  onUpgrade: () => void;
 };
 
 export default function PluginsPanel({
@@ -32,7 +35,11 @@ export default function PluginsPanel({
   highlightToolId,
   onConnectionsChange,
   onOpenMcpWithPrefill,
+  maxAllowed,
+  currentTotal,
+  onUpgrade,
 }: Props) {
+  const atLimit = currentTotal >= maxAllowed;
   const [connected, setConnected] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -51,8 +58,12 @@ export default function PluginsPanel({
   }, [open, uid]);
 
   async function toggle(toolId: string) {
-    setBusyId(toolId);
     const isConnected = connected.includes(toolId);
+    if (!isConnected && atLimit) {
+      onUpgrade();
+      return;
+    }
+    setBusyId(toolId);
     if (isConnected) {
       await disconnectPlugin(uid, toolId);
       const next = connected.filter((id) => id !== toolId);
@@ -68,6 +79,10 @@ export default function PluginsPanel({
   }
 
   async function handleOAuthConnect(toolId: string) {
+    if (atLimit) {
+      onUpgrade();
+      return;
+    }
     setBusyId(toolId);
     setError(null);
     try {
@@ -80,6 +95,10 @@ export default function PluginsPanel({
   }
 
   async function handleSaveApiKey(toolId: string) {
+    if (atLimit) {
+      onUpgrade();
+      return;
+    }
     if (!keyInputValue.trim()) return;
     setBusyId(toolId);
     await connectPluginWithApiKey(uid, toolId, keyInputValue.trim());
@@ -99,6 +118,14 @@ export default function PluginsPanel({
       subtitle="Connect the tools your agent should be able to use."
     >
       {error && <p className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
+      {atLimit && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+          <span>You've used {currentTotal}/{maxAllowed} plugin + MCP slots on your plan.</span>
+          <button onClick={onUpgrade} className="shrink-0 rounded-md bg-clay px-2.5 py-1 font-medium text-cream hover:bg-clay-dark">
+            Upgrade
+          </button>
+        </div>
+      )}
 
       <div className="space-y-8">
         {PLUGIN_CATEGORIES.map((cat) => (
