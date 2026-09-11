@@ -23,17 +23,24 @@ function assetsScript(assets: Attachment[]): string {
     .join(",\n");
   return `<script>
 window.AGENTICVENUS_ASSETS = (function() {
-  const dataUrls = {\n${entries}\n  };
+  const sources = {\n${entries}\n  };
   const out = {};
-  for (const name in dataUrls) {
-    try {
-      const [meta, b64] = dataUrls[name].split(",");
-      const mime = meta.match(/data:(.*?);base64/)[1];
-      const bin = atob(b64);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      out[name] = URL.createObjectURL(new Blob([bytes], { type: mime }));
-    } catch (e) { console.error("Failed to load asset", name, e); }
+  for (const name in sources) {
+    const src = sources[name];
+    if (src.startsWith("data:")) {
+      // Legacy small assets stored as inline base64.
+      try {
+        const [meta, b64] = src.split(",");
+        const mime = meta.match(/data:(.*?);base64/)[1];
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        out[name] = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      } catch (e) { console.error("Failed to load asset", name, e); }
+    } else {
+      // Real hosted URL (Firebase Storage) — loaders can fetch it directly.
+      out[name] = src;
+    }
   }
   return out;
 })();
