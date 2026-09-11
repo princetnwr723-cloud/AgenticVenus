@@ -13,7 +13,7 @@ import type { CodeFile } from "@/lib/codeExtract";
 import type { Attachment } from "@/lib/chatClient";
 import { buildPreviewHtml, listHtmlPages } from "@/lib/preview";
 import { highlightCode } from "@/lib/syntaxHighlight";
-import { startCloudPreview, stopCloudPreview } from "@/lib/sandboxClient";
+import { startCloudPreview, waitForCloudPreview, stopCloudPreview } from "@/lib/sandboxClient";
 
 type Props = {
   open: boolean;
@@ -58,6 +58,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
   const [cloudSandboxId, setCloudSandboxId] = useState<string | null>(null);
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
+  const [cloudLog, setCloudLog] = useState<string>("");
 
   if (!open) return null;
 
@@ -81,12 +82,15 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
     if (files.length === 0) return;
     setCloudLoading(true);
     setCloudError(null);
+    setCloudLog("");
+    setCloudUrl(null);
     if (cloudSandboxId) await stopCloudPreview(cloudSandboxId);
     try {
-      const { sandboxId, previewUrl } = await startCloudPreview(files);
+      const { sandboxId } = await startCloudPreview(files);
       setCloudSandboxId(sandboxId);
-      setCloudUrl(previewUrl);
       setViewMode("preview");
+      const previewUrl = await waitForCloudPreview(sandboxId, (log) => setCloudLog(log));
+      setCloudUrl(previewUrl);
     } catch (err) {
       setCloudError(err instanceof Error ? err.message : "Failed to start the cloud sandbox.");
     } finally {
@@ -98,6 +102,8 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
     if (cloudSandboxId) stopCloudPreview(cloudSandboxId);
     setCloudSandboxId(null);
     setCloudUrl(null);
+    setCloudLog("");
+    setCloudError(null);
   }
 
   async function handleDownloadFile() {
@@ -193,6 +199,16 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
           <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-cream/40">
             The Developer Agent hasn&apos;t written any code in this chat yet.
             Ask it to build something and files will show up here.
+          </div>
+        ) : viewMode === "preview" && cloudLoading && !cloudUrl ? (
+          <div className="flex h-full w-full flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-clay" />
+            <p className="text-sm text-cream/70">Starting your cloud sandbox — installing dependencies and starting the server...</p>
+            {cloudLog && (
+              <pre className="mt-2 max-h-40 w-full max-w-lg overflow-auto rounded-md bg-black/40 p-3 text-left text-[11px] text-cream/50">
+                {cloudLog}
+              </pre>
+            )}
           </div>
         ) : viewMode === "preview" && (cloudUrl || previewHtml) ? (
           <div className="flex h-full w-full flex-1 flex-col">
