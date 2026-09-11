@@ -33,6 +33,7 @@ import PricingPanel from "@/components/PricingPanel";
 import { listInstalledSkillIds, buildInstalledSkillsContext } from "@/lib/skillConnections";
 import { getUserPlanId, canSendMessage, incrementTodayUsage } from "@/lib/userPlan";
 import { getPlan, type PlanId } from "@/lib/plans";
+import { uploadAssetFile } from "@/lib/uploadAsset";
 import {
   getBusinessDNA,
   buildBusinessContext,
@@ -384,6 +385,24 @@ export default function HomePage() {
     const MAX_SIZE = 800 * 1024; // 800KB — keeps Firestore doc size safe
 
     for (const file of Array.from(fileList)) {
+      if (ASSET_EXT.test(file.name)) {
+        // 3D models and similar binary assets — usually far bigger than
+        // Firestore's per-document limit, so these go to Firebase Storage
+        // instead of inline base64 (own 50MB cap, not the 800KB one
+        // below). The AI can't "see" these either way (no model reads
+        // raw mesh data), but they get made available to whatever
+        // Three.js code the Developer Agent writes, via
+        // window.AGENTICVENUS_ASSETS in the Codespace preview.
+        try {
+          const url = await uploadAssetFile(user!.uid, file);
+          setPendingAttachments((prev) => [...prev, { name: file.name, mimeType: file.type || "application/octet-stream", dataUrl: url }]);
+          setInput((prev) => `${prev}${prev ? "\n\n" : ""}[Attached 3D asset: ${file.name} — load it via window.AGENTICVENUS_ASSETS['${file.name}'] in the preview]`);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : `Failed to upload "${file.name}".`);
+        }
+        continue;
+      }
+
       if (file.size > MAX_SIZE) {
         setError(`"${file.name}" is too large (max ~800KB per file for now).`);
         continue;
@@ -396,19 +415,6 @@ export default function HomePage() {
           reader.readAsDataURL(file);
         });
         setPendingAttachments((prev) => [...prev, { name: file.name, mimeType: file.type, dataUrl }]);
-      } else if (ASSET_EXT.test(file.name)) {
-        // 3D models and similar binary assets — the AI can't "see" these
-        // (no model reads raw mesh data), but they get made available to
-        // whatever Three.js code the Developer Agent writes, via
-        // window.AGENTICVENUS_ASSETS in the Codespace preview.
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-        setPendingAttachments((prev) => [...prev, { name: file.name, mimeType: file.type || "application/octet-stream", dataUrl }]);
-        setInput((prev) => `${prev}${prev ? "\n\n" : ""}[Attached 3D asset: ${file.name} — load it via window.AGENTICVENUS_ASSETS['${file.name}'] in the preview]`);
       } else if (TEXT_TYPES.includes(file.type) || /\.(txt|md|csv|json)$/i.test(file.name)) {
         const text = await file.text();
         setInput((prev) => `${prev}${prev ? "\n\n" : ""}[Attached file: ${file.name}]\n${text}`);
