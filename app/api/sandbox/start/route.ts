@@ -1,12 +1,15 @@
 // app/api/sandbox/start/route.ts
-// Spins up a real E2B cloud sandbox, writes the Developer Agent's files
-// into it, runs the project's real start command, and returns a live
-// preview URL — this is what lets Codespace preview ANY language, not
-// just what a browser iframe can render.
+// Kicks off a real cloud sandbox and returns immediately — the install
+// and start command run in the background inside the sandbox. The
+// client then polls /api/sandbox/status until the server is actually
+// listening (a real npm install can take much longer than this single
+// request is allowed to run for).
 
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuth } from "@/lib/firebaseAdmin";
 import { startCloudSandbox } from "@/lib/sandboxRun";
+
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
