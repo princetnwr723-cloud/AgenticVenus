@@ -394,7 +394,7 @@ export default function HomePage() {
         // Three.js code the Developer Agent writes, via
         // window.AGENTICVENUS_ASSETS in the Codespace preview.
         try {
-          const url = await uploadAssetFile(user!.uid, file);
+          const url = await uploadAssetFile(file);
           setPendingAttachments((prev) => [...prev, { name: file.name, mimeType: file.type || "application/octet-stream", dataUrl: url }]);
           setInput((prev) => `${prev}${prev ? "\n\n" : ""}[Attached 3D asset: ${file.name} — load it via window.AGENTICVENUS_ASSETS['${file.name}'] in the preview]`);
         } catch (err) {
