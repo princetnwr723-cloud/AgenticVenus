@@ -15,10 +15,16 @@
 // desired resources baked in, then pass { snapshot: "that-name" } here.
 //
 // NOTE: the exact field name Daytona's screenshot call returns the
-// image under (`.image` here) and the scroll method aren't fully
-// confirmed against the very latest SDK version — if either throws at
-// runtime, check `@daytona/sdk`'s current TypeScript types for the
-// actual shape and adjust these two spots.
+// image under (`.image` here) isn't fully confirmed against the very
+// latest SDK version — if it throws at runtime, check `@daytona/sdk`'s
+// current TypeScript types for the actual shape and adjust that spot.
+//
+// NOTE: Daytona's mouse.scroll() signature is (x, y, direction, amount)
+// — it scrolls AT a screen position, not just "by an amount". Since our
+// ComputerAction only carries a plain amount from callers, we default
+// x/y to the center of a 1280x800 display and derive direction from the
+// sign of amount. Pass explicit x/y/direction on the action for
+// scrolling at a specific spot (e.g. inside a scrollable panel).
 
 import { Daytona } from "@daytona/sdk";
 
@@ -29,7 +35,7 @@ export type ComputerAction =
   | { type: "click"; x: number; y: number; button?: "left" | "right" | "middle"; double?: boolean }
   | { type: "type"; text: string }
   | { type: "key"; key: string }
-  | { type: "scroll"; amount: number }
+  | { type: "scroll"; amount: number; x?: number; y?: number; direction?: "up" | "down" }
   | { type: "wait"; ms: number };
 
 export async function startComputer(apiKey: string): Promise<{ sandboxId: string; streamUrl: string }> {
@@ -63,9 +69,13 @@ export async function runComputerAction(
     case "key":
       await sandbox.computerUse.keyboard.press(action.key);
       break;
-    case "scroll":
-      await sandbox.computerUse.mouse.scroll(action.amount);
+    case "scroll": {
+      const x = action.x ?? 640;
+      const y = action.y ?? 400;
+      const direction = action.direction ?? (action.amount < 0 ? "up" : "down");
+      await sandbox.computerUse.mouse.scroll(x, y, direction, Math.abs(action.amount));
       break;
+    }
     case "wait":
       await new Promise((r) => setTimeout(r, Math.min(action.ms, 5000)));
       break;
