@@ -1,7 +1,7 @@
 // lib/sandboxClient.ts
-// Client-side glue for Codespace's "Run in Cloud" — starts a sandbox,
-// then polls until the server is actually ready (real installs can take
-// well over a minute, so this isn't a single blocking call).
+// Client-side glue for Codespace's "Run in Cloud". The API routes read
+// the user's own E2B key from Firestore server-side (Settings →
+// Integrations) — nothing sensitive passes through the client here.
 
 import { auth } from "@/lib/firebase";
 import type { CodeFile } from "@/lib/codeExtract";
@@ -34,13 +34,13 @@ async function checkStatus(sandboxId: string): Promise<{ ready: boolean; preview
   return data;
 }
 
-/** Polls until the sandbox's server is ready, calling onProgress with
- * each check's log tail so the UI can show what's happening. Gives up
- * after `timeoutMs` (default 2 minutes). */
+/** Polls until the sandbox's server is ready. Default timeout raised to
+ * 6 minutes — real installs (Next.js + several packages) can take a
+ * while, and giving up too early was the earlier "Closed Port Error". */
 export async function waitForCloudPreview(
   sandboxId: string,
   onProgress?: (log: string, elapsedMs: number) => void,
-  timeoutMs = 120_000
+  timeoutMs = 6 * 60 * 1000
 ): Promise<string> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -50,7 +50,7 @@ export async function waitForCloudPreview(
     await new Promise((r) => setTimeout(r, 3000));
   }
   throw new Error(
-    "The sandbox is still starting after 2 minutes — it may need a different start command, or the project may have an error. Check the log above, or your run.sh."
+    "The sandbox is still starting after 6 minutes — it may need a different start command, or the project may have an error. Check the log above, or your run.sh."
   );
 }
 
