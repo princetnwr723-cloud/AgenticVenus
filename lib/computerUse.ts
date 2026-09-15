@@ -6,6 +6,14 @@
 // can see (screenshot), move a mouse on, type into, and click through —
 // with a live view URL the user can watch in real time.
 //
+// NOTE: custom `resources` can't be combined with the default desktop
+// snapshot — passing `resources` forces Daytona's image-based create()
+// path, which needs an `image` and won't have the desktop environment
+// pre-installed. Using the plain default snapshot below (no resources
+// override) is what actually gives us computerUse. To get bigger specs
+// later, build a custom Snapshot in the Daytona dashboard with the
+// desired resources baked in, then pass { snapshot: "that-name" } here.
+//
 // NOTE: the exact field name Daytona's screenshot call returns the
 // image under (`.image` here) and the scroll method aren't fully
 // confirmed against the very latest SDK version — if either throws at
@@ -15,7 +23,6 @@
 import { Daytona } from "@daytona/sdk";
 
 const VNC_PORT = 6080;
-const TOP_SPECS = { cpu: 4, memory: 8, disk: 10 };
 
 export type ComputerAction =
   | { type: "screenshot" }
@@ -29,7 +36,7 @@ export async function startComputer(apiKey: string): Promise<{ sandboxId: string
   if (!apiKey) throw new Error("No Daytona API key — add yours in Settings → Integrations.");
 
   const daytona = new Daytona({ apiKey });
-  const sandbox = await daytona.create({ resources: TOP_SPECS });
+  const sandbox = await daytona.create(); // default snapshot — includes desktop environment
   await sandbox.computerUse.start();
   const preview = await sandbox.getPreviewLink(VNC_PORT);
 
