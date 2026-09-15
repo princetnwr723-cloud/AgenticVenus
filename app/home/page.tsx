@@ -17,6 +17,8 @@ import CodespacePanel from "@/components/CodespacePanel";
 import ModelDropdown from "@/components/ModelDropdown";
 import SettingsPanel from "@/components/SettingsPanel";
 import ToolConnectPrompt from "@/components/ToolConnectPrompt";
+import ComputerViewPanel from "@/components/ComputerViewPanel";
+import { startComputerSession, stopComputerSession, runComputerTask } from "@/lib/computerClient";
 import FilesPanel from "@/components/FilesPanel";
 import {
   getPrimaryConnection,
@@ -119,6 +121,12 @@ export default function HomePage() {
   const [pricingOpen, setPricingOpen] = useState(false);
   const [planId, setPlanId] = useState<PlanId>("free");
   const [usageLimitError, setUsageLimitError] = useState<string | null>(null);
+  const [computerViewOpen, setComputerViewOpen] = useState(false);
+  const [computerStreamUrl, setComputerStreamUrl] = useState<string | null>(null);
+  const [computerSandboxId, setComputerSandboxId] = useState<string | null>(null);
+  const [computerStarting, setComputerStarting] = useState(false);
+  const [computerStepLog, setComputerStepLog] = useState<string[]>([]);
+  const [computerRunning, setComputerRunning] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -361,6 +369,47 @@ export default function HomePage() {
     if (!user) return;
     await saveChatMessages(user.uid, id, msgs, agentId, providerId);
     await refreshChats();
+  }
+
+  async function handleStartComputer() {
+    setComputerStarting(true);
+    try {
+      const { sandboxId, streamUrl } = await startComputerSession();
+      setComputerSandboxId(sandboxId);
+      setComputerStreamUrl(streamUrl);
+    } catch (err) {
+      setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start computer."]);
+    } finally {
+      setComputerStarting(false);
+    }
+  }
+
+  async function handleStopComputer() {
+    if (computerSandboxId) await stopComputerSession(computerSandboxId);
+    setComputerSandboxId(null);
+    setComputerStreamUrl(null);
+    setComputerStepLog([]);
+  }
+
+  async function handleRunComputerTask(task: string) {
+    if (!computerSandboxId || !activeConnection) return;
+    setComputerRunning(true);
+    setComputerStepLog([]);
+    try {
+      const summary = await runComputerTask(
+        activeConnection.provider.id,
+        activeConnection.apiKey,
+        computerSandboxId,
+        task,
+        activeConnection.model,
+        (step) => setComputerStepLog((prev) => [...prev, step])
+      );
+      setComputerStepLog((prev) => [...prev, `✓ ${summary}`]);
+    } catch (err) {
+      setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Task failed."]);
+    } finally {
+      setComputerRunning(false);
+    }
   }
 
   function handleSelectProviderForChat(providerId: string) {
@@ -635,15 +684,24 @@ export default function HomePage() {
               />
             )}
             <AgentTeamPanel activeAgent={activeAgent} classifying={classifying} />
-            {activeAgent?.isDeveloper && (
-              <button
-                onClick={() => setCodespaceOpen(true)}
-                className="focus-ring flex items-center gap-2 rounded-md border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink/80 transition-all hover:-translate-y-0.5 hover:shadow-sm"
-              >
-                <span className="h-1.5 w-1.5 rounded-full bg-[#4D6BFE]" />
-                Codespace
-              </button>
-            )}
+            <button
+              onClick={() => setCodespaceOpen(true)}
+              className="focus-ring flex items-center gap-2 rounded-md border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink/80 transition-all hover:-translate-y-0.5 hover:shadow-sm"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-[#4D6BFE]" />
+              Codespace
+            </button>
+            <button
+              onClick={() => setComputerViewOpen(true)}
+              aria-label="Cloud computer live view"
+              title="Cloud computer live view"
+              className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <rect x="1.5" y="2.5" width="11" height="7" rx="1" stroke="currentColor" strokeWidth="1.2" />
+                <path d="M5 12h4M7 9.5V12" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              </svg>
+            </button>
             <button
               onClick={() => setFilesOpen(true)}
               aria-label="Files"
@@ -921,7 +979,19 @@ export default function HomePage() {
         currentPlanId={planId}
         onPlanChange={setPlanId}
       />
+      <ComputerViewPanel
+        open={computerViewOpen}
+        onClose={() => setComputerViewOpen(false)}
+        streamUrl={computerStreamUrl}
+        starting={computerStarting}
+        onStart={handleStartComputer}
+        onStop={handleStopComputer}
+        stepLog={computerStepLog}
+        onRunTask={handleRunComputerTask}
+        running={computerRunning}
+      />
       <SettingsPanel
+        uid={user.uid}
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         connections={connections}
