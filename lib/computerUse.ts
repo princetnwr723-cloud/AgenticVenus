@@ -15,7 +15,7 @@
 import { Daytona } from "@daytona/sdk";
 
 const VNC_PORT = 6080;
-const TOP_SPECS = { cpu: 4, memory: 16, disk: 50 };
+const TOP_SPECS = { cpu: 4, memory: 8, disk: 10 };
 
 export type ComputerAction =
   | { type: "screenshot" }
