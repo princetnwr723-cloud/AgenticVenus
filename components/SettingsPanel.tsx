@@ -7,13 +7,15 @@
 // conversation (each conversation can use its own bot — you're never
 // locked into one Telegram account for everything).
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import SlideOverPanel from "@/components/SlideOverPanel";
 import type { SavedConnection } from "@/lib/connections";
 import { connectTelegram, disconnectTelegram } from "@/lib/telegram";
 import type { ChatRecord } from "@/lib/chats";
+import { getIntegrationKeys, saveIntegrationKeys, type IntegrationKeys } from "@/lib/integrationKeys";
 
 type Props = {
+  uid: string;
   open: boolean;
   onClose: () => void;
   connections: SavedConnection[];
@@ -28,6 +30,7 @@ type Props = {
 };
 
 export default function SettingsPanel({
+  uid,
   open,
   onClose,
   connections,
@@ -43,6 +46,20 @@ export default function SettingsPanel({
   const [botToken, setBotToken] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [integrationKeys, setIntegrationKeys] = useState<IntegrationKeys>({});
+  const [savingKeys, setSavingKeys] = useState(false);
+
+  useEffect(() => {
+    if (open) getIntegrationKeys(uid).then(setIntegrationKeys);
+  }, [open, uid]);
+
+  async function handleSaveIntegrationKey(field: keyof IntegrationKeys, value: string) {
+    setSavingKeys(true);
+    const next = { ...integrationKeys, [field]: value };
+    setIntegrationKeys(next);
+    await saveIntegrationKeys(uid, { [field]: value });
+    setSavingKeys(false);
+  }
 
   async function handleConnectTelegram() {
     if (!chatId) {
@@ -219,6 +236,72 @@ export default function SettingsPanel({
           cron job, which is a further step.
         </p>
       </div>
+
+      {/* Integrations — infrastructure keys shared across every chat */}
+      <div className="mt-8 border-t border-ink/10 pt-6">
+        <h3 className="text-sm font-medium text-ink">Integrations</h3>
+        <p className="mt-1 text-xs text-ink/50">
+          These keys are shared across every chat's agent (a new chat
+          still starts each session fresh — logins, running VMs, etc.
+          aren't carried over).
+        </p>
+
+        <div className="mt-4 space-y-4">
+          <div>
+            <label className="mb-1 block text-sm text-ink/70">Daytona API key</label>
+            <p className="mb-1.5 text-xs text-ink/45">Gives the agent a real cloud computer (4 vCPU / 16GB RAM / 50GB) with a live view.</p>
+            <input
+              type="password"
+              value={integrationKeys.daytonaApiKey || ""}
+              onChange={(e) => setIntegrationKeys({ ...integrationKeys, daytonaApiKey: e.target.value })}
+              onBlur={(e) => handleSaveIntegrationKey("daytonaApiKey", e.target.value)}
+              placeholder="dtn_..."
+              className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-sm text-ink/70">Browserless API key</label>
+            <p className="mb-1.5 text-xs text-ink/45">Lets the agent browse the web for tasks Plugins/MCP can't handle, with a live view.</p>
+            <input
+              type="password"
+              value={integrationKeys.browserlessApiKey || ""}
+              onChange={(e) => setIntegrationKeys({ ...integrationKeys, browserlessApiKey: e.target.value })}
+              onBlur={(e) => handleSaveIntegrationKey("browserlessApiKey", e.target.value)}
+              placeholder="Your Browserless token"
+              className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-sm text-ink/70">Vercel API token</label>
+            <p className="mb-1.5 text-xs text-ink/45">Lets the agent publish a Codespace project to a real live URL.</p>
+            <input
+              type="password"
+              value={integrationKeys.vercelApiToken || ""}
+              onChange={(e) => setIntegrationKeys({ ...integrationKeys, vercelApiToken: e.target.value })}
+              onBlur={(e) => handleSaveIntegrationKey("vercelApiToken", e.target.value)}
+              placeholder="Your Vercel token"
+              className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-sm text-ink/70">Netlify API token</label>
+            <input
+              type="password"
+              value={integrationKeys.netlifyApiToken || ""}
+              onChange={(e) => setIntegrationKeys({ ...integrationKeys, netlifyApiToken: e.target.value })}
+              onBlur={(e) => handleSaveIntegrationKey("netlifyApiToken", e.target.value)}
+              placeholder="Your Netlify token"
+              className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
+            />
+          </div>
+
+          {savingKeys && <p className="text-xs text-ink/35">Saving...</p>}
+        </div>
+      </div>
     </SlideOverPanel>
+
   );
 }
