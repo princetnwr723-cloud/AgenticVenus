@@ -372,17 +372,20 @@ export default function HomePage() {
   }
 
   async function handleStartComputer() {
-    setComputerStarting(true);
-    try {
-      const { sandboxId, streamUrl } = await startComputerSession();
-      setComputerSandboxId(sandboxId);
-      setComputerStreamUrl(streamUrl);
-    } catch (err) {
-      setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start computer."]);
-    } finally {
-      setComputerStarting(false);
-    }
+  setComputerStarting(true);
+  try {
+    const { sandboxId } = await startComputerSession();
+    setComputerSandboxId(sandboxId);
+    const idToken = await auth.currentUser?.getIdToken();
+    setComputerStreamUrl(
+      `/api/computer/view?sandboxId=${encodeURIComponent(sandboxId)}&token=${encodeURIComponent(idToken || "")}`
+    );
+  } catch (err) {
+    setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start computer."]);
+  } finally {
+    setComputerStarting(false);
   }
+}
 
   async function handleStopComputer() {
     if (computerSandboxId) await stopComputerSession(computerSandboxId);
