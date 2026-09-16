@@ -377,9 +377,7 @@ export default function HomePage() {
     const { sandboxId } = await startComputerSession();
     setComputerSandboxId(sandboxId);
     const idToken = await auth.currentUser?.getIdToken();
-    setComputerStreamUrl(
-      `/api/computer/view?sandboxId=${encodeURIComponent(sandboxId)}&token=${encodeURIComponent(idToken || "")}`
-    );
+    setComputerStreamUrl(`/api/computer/view/${sandboxId}/${idToken}/vnc.html`);
   } catch (err) {
     setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start computer."]);
   } finally {
