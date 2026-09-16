@@ -1,3 +1,4 @@
+
 // lib/computerUse.ts
 // A real cloud computer for the agent — like Grok's "computer" feature.
 // Built on Daytona's Computer Use sandboxes. No spec-picking dialog —
@@ -89,4 +90,22 @@ export async function stopComputer(sandboxId: string, apiKey: string): Promise<v
   const daytona = new Daytona({ apiKey });
   const sandbox = await daytona.get(sandboxId);
   await sandbox.delete();
+}
+
+// Fetches a "signed" preview URL for a port — auth token is embedded in
+// the URL itself (no header needed), which is what lets our proxy route
+// below hand it straight to the browser without any auth headaches.
+export async function getSignedPreviewUrl(
+  sandboxId: string,
+  apiKey: string,
+  port: number,
+  expiresInSeconds = 43200 // 12h — long enough for a working session
+): Promise<{ url: string; token: string }> {
+  const res = await fetch(
+    `https://app.daytona.io/api/sandbox/${sandboxId}/ports/${port}/signed-preview-url?expiresInSeconds=${expiresInSeconds}`,
+    { headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" } }
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.message || "Failed to get a signed preview URL from Daytona.");
+  return { url: data.url, token: data.token };
 }
