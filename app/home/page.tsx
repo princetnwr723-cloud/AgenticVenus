@@ -18,7 +18,9 @@ import ModelDropdown from "@/components/ModelDropdown";
 import SettingsPanel from "@/components/SettingsPanel";
 import ToolConnectPrompt from "@/components/ToolConnectPrompt";
 import ComputerViewPanel from "@/components/ComputerViewPanel";
+import BrowserViewPanel from "@/components/BrowserViewPanel";
 import { startComputerSession, stopComputerSession, runComputerTask } from "@/lib/computerClient";
+import { startBrowserSession, stopBrowserSession, runBrowserTask } from "@/lib/browserClient";
 import FilesPanel from "@/components/FilesPanel";
 import {
   getPrimaryConnection,
@@ -36,6 +38,7 @@ import { listInstalledSkillIds, buildInstalledSkillsContext } from "@/lib/skillC
 import { getUserPlanId, canSendMessage, incrementTodayUsage } from "@/lib/userPlan";
 import { getPlan, type PlanId } from "@/lib/plans";
 import { uploadAssetFile } from "@/lib/uploadAsset";
+import { getIntegrationKeys, type IntegrationKeys } from "@/lib/integrationKeys";
 import {
   getBusinessDNA,
   buildBusinessContext,
@@ -75,6 +78,7 @@ export default function HomePage() {
   const [usingMcpTool, setUsingMcpTool] = useState<string | null>(null);
   const [usingPluginAction, setUsingPluginAction] = useState<string | null>(null);
   const [mcpBanner, setMcpBanner] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [integrationKeys, setIntegrationKeys] = useState<IntegrationKeys>({});
 
   const [modalOpen, setModalOpen] = useState(false);
   const [forceSelect, setForceSelect] = useState(false);
@@ -87,6 +91,7 @@ export default function HomePage() {
   const [mcpPrefill, setMcpPrefill] = useState<{ name: string; url: string } | null>(null);
   const [businessOpen, setBusinessOpen] = useState(false);
   const [codespaceOpen, setCodespaceOpen] = useState(false);
+  const [codespaceOpenFileId, setCodespaceOpenFileId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Agent Team
@@ -121,12 +126,22 @@ export default function HomePage() {
   const [pricingOpen, setPricingOpen] = useState(false);
   const [planId, setPlanId] = useState<PlanId>("free");
   const [usageLimitError, setUsageLimitError] = useState<string | null>(null);
+
+  // Cloud Computer (Daytona)
   const [computerViewOpen, setComputerViewOpen] = useState(false);
   const [computerStreamUrl, setComputerStreamUrl] = useState<string | null>(null);
   const [computerSandboxId, setComputerSandboxId] = useState<string | null>(null);
   const [computerStarting, setComputerStarting] = useState(false);
   const [computerStepLog, setComputerStepLog] = useState<string[]>([]);
   const [computerRunning, setComputerRunning] = useState(false);
+
+  // Browser (Browserless)
+  const [browserViewOpen, setBrowserViewOpen] = useState(false);
+  const [browserLiveUrl, setBrowserLiveUrl] = useState<string | null>(null);
+  const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
+  const [browserStarting, setBrowserStarting] = useState(false);
+  const [browserStepLog, setBrowserStepLog] = useState<string[]>([]);
+  const [browserRunning, setBrowserRunning] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -149,7 +164,7 @@ export default function HomePage() {
     if (!user) return;
     (async () => {
       try {
-        const [existing, allConns, dna, toolIds, servers, skillIds, userPlanId] = await Promise.all([
+        const [existing, allConns, dna, toolIds, servers, skillIds, userPlanId, intKeys] = await Promise.all([
           getPrimaryConnection(user.uid),
           getAllConnections(user.uid),
           getBusinessDNA(user.uid),
@@ -157,6 +172,7 @@ export default function HomePage() {
           listMCPServers(user.uid),
           listInstalledSkillIds(user.uid),
           getUserPlanId(user.uid),
+          getIntegrationKeys(user.uid),
         ]);
         setConnections(allConns);
         if (existing) {
@@ -172,6 +188,7 @@ export default function HomePage() {
         setMcpServers(servers);
         setInstalledSkillIds(skillIds);
         setPlanId(userPlanId);
+        setIntegrationKeys(intKeys);
         await refreshChats();
       } catch (err) {
         console.error("[home] failed to load workspace data:", err);
@@ -295,9 +312,6 @@ export default function HomePage() {
   // (email, MCP tools, etc.) and takes reasonable action on its own —
   // reusing the exact same tool-orchestration pipeline as a normal
   // message (processTask), so it can genuinely act, not just talk.
-  // Like Scheduler, this only runs while this tab is open — true
-  // always-on background execution needs a Vercel Cron job calling the
-  // same logic server-side (see README).
   useEffect(() => {
     if (!ceoMode || !chatId || !activeConnection) return;
     const CEO_SURVEY_PROMPT =
@@ -371,19 +385,20 @@ export default function HomePage() {
     await refreshChats();
   }
 
+  // ---------- Cloud Computer (Daytona) ----------
   async function handleStartComputer() {
-  setComputerStarting(true);
-  try {
-    const { sandboxId } = await startComputerSession();
-    setComputerSandboxId(sandboxId);
-    const idToken = await auth.currentUser?.getIdToken();
-    setComputerStreamUrl(`/api/computer/view/${sandboxId}/${idToken}/vnc.html`);
-  } catch (err) {
-    setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start computer."]);
-  } finally {
-    setComputerStarting(false);
+    setComputerStarting(true);
+    try {
+      const { sandboxId } = await startComputerSession();
+      setComputerSandboxId(sandboxId);
+      const idToken = await auth.currentUser?.getIdToken();
+      setComputerStreamUrl(`/api/computer/view/${sandboxId}/${idToken}/vnc.html`);
+    } catch (err) {
+      setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start computer."]);
+    } finally {
+      setComputerStarting(false);
+    }
   }
-}
 
   async function handleStopComputer() {
     if (computerSandboxId) await stopComputerSession(computerSandboxId);
@@ -413,6 +428,48 @@ export default function HomePage() {
     }
   }
 
+  // ---------- Browser (Browserless) ----------
+  async function handleStartBrowser() {
+    setBrowserStarting(true);
+    try {
+      const { sessionId, liveUrl } = await startBrowserSession();
+      setBrowserSessionId(sessionId);
+      setBrowserLiveUrl(liveUrl);
+    } catch (err) {
+      setBrowserStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start browser."]);
+    } finally {
+      setBrowserStarting(false);
+    }
+  }
+
+  async function handleStopBrowser() {
+    if (browserSessionId) await stopBrowserSession(browserSessionId);
+    setBrowserSessionId(null);
+    setBrowserLiveUrl(null);
+    setBrowserStepLog([]);
+  }
+
+  async function handleRunBrowserTask(task: string) {
+    if (!browserSessionId || !activeConnection) return;
+    setBrowserRunning(true);
+    setBrowserStepLog([]);
+    try {
+      const summary = await runBrowserTask(
+        activeConnection.provider.id,
+        activeConnection.apiKey,
+        browserSessionId,
+        task,
+        activeConnection.model,
+        (step) => setBrowserStepLog((prev) => [...prev, step])
+      );
+      setBrowserStepLog((prev) => [...prev, `✓ ${summary}`]);
+    } catch (err) {
+      setBrowserStepLog((prev) => [...prev, err instanceof Error ? err.message : "Task failed."]);
+    } finally {
+      setBrowserRunning(false);
+    }
+  }
+
   function handleSelectProviderForChat(providerId: string) {
     setActiveProviderId(providerId);
     if (user && chatId) {
@@ -436,13 +493,6 @@ export default function HomePage() {
 
     for (const file of Array.from(fileList)) {
       if (ASSET_EXT.test(file.name)) {
-        // 3D models and similar binary assets — usually far bigger than
-        // Firestore's per-document limit, so these go to Firebase Storage
-        // instead of inline base64 (own 50MB cap, not the 800KB one
-        // below). The AI can't "see" these either way (no model reads
-        // raw mesh data), but they get made available to whatever
-        // Three.js code the Developer Agent writes, via
-        // window.AGENTICVENUS_ASSETS in the Codespace preview.
         try {
           const url = await uploadAssetFile(file);
           setPendingAttachments((prev) => [...prev, { name: file.name, mimeType: file.type || "application/octet-stream", dataUrl: url }]);
@@ -537,11 +587,7 @@ export default function HomePage() {
       return;
     }
 
-    // 0.5 Does this need a tool the agent doesn't have? A plugin counts as
-    // "connected" here if either its own toggle is on, OR a real MCP
-    // server already covers it (e.g. an MCP server named "Gmail") — this
-    // is what stops the agent asking to "connect Gmail in Plugins" when
-    // Gmail is already working through MCP.
+    // 0.5 Does this need a tool the agent doesn't have?
     const effectiveToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
     const need = await detectToolNeed(provider.id, activeKey, nextMessages, effectiveToolIds, model);
     if (need && !need.connected) {
@@ -557,8 +603,7 @@ export default function HomePage() {
     setActiveAgent(agent);
     setClassifying(false);
 
-    // 1.5 If an MCP tool (e.g. Creatify) looks relevant, actually call it
-    // for real via our server route, and fold the result into the reply.
+    // 1.5 If an MCP tool looks relevant, actually call it for real.
     let toolResultNote = "";
     if (mcpServers.length > 0) {
       const toolCall = await decideMcpToolCall(provider.id, activeKey, nextMessages, mcpServers, model);
@@ -576,9 +621,7 @@ export default function HomePage() {
       }
     }
 
-    // 1.6 Same idea, but for plugins with a real dedicated connection
-    // (like Gmail via OAuth) — actually send the email / create the
-    // draft / etc. instead of just talking about it.
+    // 1.6 Same idea, but for plugins with a real dedicated connection.
     if (effectiveToolIds.length > 0) {
       const planned = await decidePluginAction(provider.id, activeKey, nextMessages, connectedToolIds, model);
       if (planned) {
@@ -595,21 +638,39 @@ export default function HomePage() {
       }
     }
 
-    // 2. The chosen specialist answers for real — with Business DNA, its
-    // connected-tools awareness, any MCP tool result, and lessons it has
-    // learned from past tasks (this is what makes it self-improving).
+    // 2. The chosen specialist answers for real.
     setSending(true);
     const toolNames = connectedToolNames(effectiveToolIds);
     const toolsContext =
       toolNames.length > 0
         ? `You currently have access to these connected tools: ${toolNames.join(", ")}. If asked to do something with one of them, answer as if you used it. If asked to do something requiring a tool NOT in this list, tell the user they can connect it in Plugins, or through MCP Tools if it's not a built-in plugin.`
         : "You don't have any tools connected yet. If a request needs an external tool (email, calendar, etc.), tell the user to connect it in Plugins or MCP Tools.";
+
+    // Infrastructure-level tools (Computer, Browser, Publish) aren't part
+    // of the Plugins catalog, so the agent needs to be told about these
+    // separately — only mentioning the ones the user has actually
+    // configured a key for.
+    const infraToolsContext = [
+      integrationKeys.daytonaApiKey
+        ? "You have a real cloud computer available (the Computer button) — if the user starts it, you can see the screen and click/type/scroll for real."
+        : null,
+      integrationKeys.browserlessApiKey
+        ? "You have real web browser access (the Browser button) — if the user starts a browser session, you can navigate, click, type, and read pages for real, not just describe what you'd do."
+        : null,
+      integrationKeys.vercelApiToken || integrationKeys.netlifyApiToken
+        ? "You can Publish anything built in Codespace to a real live URL (Vercel/Netlify) — mention the Publish button once code is ready."
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
     const installedSkillsContext = buildInstalledSkillsContext(installedSkillIds);
     const lessons = await getAgentLessons(user.uid, agent.id);
     const systemPrompt = [
       agent.systemPrompt,
       buildBusinessContext(businessDNA),
       toolsContext,
+      infraToolsContext,
       installedSkillsContext,
       buildLessonsContext(lessons),
       toolResultNote,
@@ -630,7 +691,6 @@ export default function HomePage() {
       setMessages(finalMessages);
       await persist(finalMessages, currentChatId, agent.id, provider.id);
       await incrementTodayUsage(user.uid);
-      // Self-improvement — reflect in the background, never blocks the reply.
       reflectAndLearn(user.uid, agent.id, provider.id, activeKey, task, text, model);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
@@ -701,6 +761,17 @@ export default function HomePage() {
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
                 <rect x="1.5" y="2.5" width="11" height="7" rx="1" stroke="currentColor" strokeWidth="1.2" />
                 <path d="M5 12h4M7 9.5V12" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              </svg>
+            </button>
+            <button
+              onClick={() => setBrowserViewOpen(true)}
+              aria-label="Browser live view"
+              title="Browser live view"
+              className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.2" />
+                <path d="M1.5 7h11M7 1.5c1.8 1.6 1.8 9 0 11M7 1.5c-1.8 1.6-1.8 9 0 11" stroke="currentColor" strokeWidth="1.1" />
               </svg>
             </button>
             <button
@@ -790,7 +861,15 @@ export default function HomePage() {
             )}
 
             {messages.map((m, i) => (
-              <ChatMessageItem key={i} message={m} onEdit={i === messages.length - 1 && m.role === "user" ? handleEditMessage : undefined} />
+              <ChatMessageItem
+                key={i}
+                message={m}
+                onEdit={i === messages.length - 1 && m.role === "user" ? handleEditMessage : undefined}
+                onOpenFile={(fileId) => {
+                  setCodespaceOpenFileId(fileId);
+                  setCodespaceOpen(true);
+                }}
+              />
             ))}
 
             {toolNeed && (
@@ -954,9 +1033,13 @@ export default function HomePage() {
       />
       <CodespacePanel
         open={codespaceOpen}
-        onClose={() => setCodespaceOpen(false)}
+        onClose={() => {
+          setCodespaceOpen(false);
+          setCodespaceOpenFileId(null);
+        }}
         files={codeFiles}
         assets={chatAssets}
+        openFileId={codespaceOpenFileId}
       />
       <FilesPanel
         open={filesOpen}
@@ -990,6 +1073,17 @@ export default function HomePage() {
         stepLog={computerStepLog}
         onRunTask={handleRunComputerTask}
         running={computerRunning}
+      />
+      <BrowserViewPanel
+        open={browserViewOpen}
+        onClose={() => setBrowserViewOpen(false)}
+        liveUrl={browserLiveUrl}
+        starting={browserStarting}
+        onStart={handleStartBrowser}
+        onStop={handleStopBrowser}
+        stepLog={browserStepLog}
+        onRunTask={handleRunBrowserTask}
+        running={browserRunning}
       />
       <SettingsPanel
         uid={user.uid}
