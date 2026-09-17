@@ -1,4 +1,10 @@
 // app/api/computer/view/[...path]/route.ts
+// Full reverse-proxy for the Daytona desktop preview. URL shape:
+// /api/computer/view/{sandboxId}/{idToken}/{realPath...}
+// The warning page shows regardless of auth type (confirmed by testing
+// a raw signed URL directly) — so proxying every request server-side
+// with the skip-header is mandatory, not optional.
+
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
 import { getSignedPreviewUrl } from "@/lib/computerUse";
@@ -7,10 +13,6 @@ const VNC_PORT = 6080;
 const TEXT_LIKE = /\.(html?|css|js|mjs|json|svg|xml|txt)$/i;
 const SKIP_HEADERS = { "X-Daytona-Skip-Preview-Warning": "true" };
 
-/** Daytona's own directory listing already links to vnc.html with the
- * correct host/port/path query params baked in for THIS sandbox's VNC
- * server. Guessing our own params was the bug — discover the real link
- * instead and use it as-is. */
 async function discoverEntryPath(base: string): Promise<string> {
   try {
     const res = await fetch(`${base}/`, { headers: SKIP_HEADERS });
@@ -18,9 +20,9 @@ async function discoverEntryPath(base: string): Promise<string> {
     const match = html.match(/href=["']([^"']*vnc[^"']*\.html[^"']*)["']/i);
     if (match) return match[1];
   } catch {
-    // fall through to a plain guess below
+    // fall through
   }
-  return "vnc.html";
+  return "vnc.html?autoconnect=true&resize=remote&reconnect=true";
 }
 
 export async function GET(req: NextRequest, { params }: { params: { path: string[] } }) {
@@ -37,10 +39,6 @@ export async function GET(req: NextRequest, { params }: { params: { path: string
 
     const signed = await getSignedPreviewUrl(sandboxId, apiKey, VNC_PORT);
     const base = signed.url.replace(/\/$/, "");
-
-    // rest.length === 0 means this is the very first load — figure out
-    // the real entry link. Everything after that (css/js/images) comes
-    // through with rest already populated, so we don't re-discover.
     const realPath = rest.length ? rest.join("/") : await discoverEntryPath(base);
 
     const upstream = await fetch(`${base}/${realPath.replace(/^\//, "")}`, { headers: SKIP_HEADERS });
@@ -56,7 +54,28 @@ export async function GET(req: NextRequest, { params }: { params: { path: string
 
       if (/\.html?$/i.test(pathOnly)) {
         const u = new URL(base);
-        const wsShim = `<script>(function(){var H="${u.host}",P="${u.protocol === "https:" ? "wss:" : "ws:"}";var O=window.WebSocket;window.WebSocket=function(x,p){try{var a=new URL(x,location.href);a.host=H;a.protocol=P;x=a.toString();}catch(e){}var w=p!==undefined?new O(x,p):new O(x);console.log("[proxy] WS ->",x);return w;};window.WebSocket.prototype=O.prototype;})();</script>`;
+        // DEBUG: shows a live-updating log of every WebSocket connect
+        // attempt right on the page — remove this banner once VNC works.
+        const wsShim = `<script>(function(){
+var H="${u.host}",P="${u.protocol === "https:" ? "wss:" : "ws:"}";
+var O=window.WebSocket;
+var banner=document.createElement("div");
+banner.style.cssText="position:fixed;top:0;left:0;right:0;z-index:999999;background:#000;color:#0f0;font:11px monospace;padding:4px;max-height:90px;overflow:auto;white-space:pre-wrap;";
+function attach(){ if(document.body) document.body.appendChild(banner); else setTimeout(attach,50); }
+attach();
+function log(m){ banner.textContent += m + "\\n"; }
+window.WebSocket=function(url,protocols){
+  var orig=url;
+  try{ var a=new URL(url,location.href); a.host=H; a.protocol=P; url=a.toString(); }catch(e){ log("rewrite err: "+e); }
+  log("WS -> "+url+" (orig: "+orig+")");
+  var ws=protocols!==undefined?new O(url,protocols):new O(url);
+  ws.addEventListener("open",function(){ log("WS OPEN"); });
+  ws.addEventListener("error",function(){ log("WS ERROR"); });
+  ws.addEventListener("close",function(e){ log("WS CLOSE code="+e.code+" reason="+e.reason); });
+  return ws;
+};
+window.WebSocket.prototype=O.prototype;
+})();</script>`;
         text = text.replace(/<head[^>]*>/i, (m) => `${m}${wsShim}`);
       }
       return new NextResponse(text, { headers: { "content-type": contentType } });
