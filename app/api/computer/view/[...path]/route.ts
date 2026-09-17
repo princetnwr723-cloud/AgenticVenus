@@ -1,10 +1,4 @@
 // app/api/computer/view/[...path]/route.ts
-// Full reverse-proxy for the Daytona desktop preview. URL shape:
-// /api/computer/view/{sandboxId}/{idToken}/{realPath...}
-// The warning page shows regardless of auth type (confirmed by testing
-// a raw signed URL directly) — so proxying every request server-side
-// with the skip-header is mandatory, not optional.
-
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
 import { getSignedPreviewUrl } from "@/lib/computerUse";
@@ -54,25 +48,22 @@ export async function GET(req: NextRequest, { params }: { params: { path: string
 
       if (/\.html?$/i.test(pathOnly)) {
         const u = new URL(base);
-        // DEBUG: shows a live-updating log of every WebSocket connect
-        // attempt right on the page — remove this banner once VNC works.
+        // The WS URL noVNC computes is built off THIS page's own path
+        // (our proxy prefix + realPath), not Daytona's real path — so we
+        // strip our prefix back off before rewriting host/protocol,
+        // leaving just the genuine remainder (e.g. "websockify").
         const wsShim = `<script>(function(){
-var H="${u.host}",P="${u.protocol === "https:" ? "wss:" : "ws:"}";
+var H="${u.host}",P="${u.protocol === "https:" ? "wss:" : "ws:"}",PFX=${JSON.stringify(prefix)};
 var O=window.WebSocket;
-var banner=document.createElement("div");
-banner.style.cssText="position:fixed;top:0;left:0;right:0;z-index:999999;background:#000;color:#0f0;font:11px monospace;padding:4px;max-height:90px;overflow:auto;white-space:pre-wrap;";
-function attach(){ if(document.body) document.body.appendChild(banner); else setTimeout(attach,50); }
-attach();
-function log(m){ banner.textContent += m + "\\n"; }
 window.WebSocket=function(url,protocols){
-  var orig=url;
-  try{ var a=new URL(url,location.href); a.host=H; a.protocol=P; url=a.toString(); }catch(e){ log("rewrite err: "+e); }
-  log("WS -> "+url+" (orig: "+orig+")");
-  var ws=protocols!==undefined?new O(url,protocols):new O(url);
-  ws.addEventListener("open",function(){ log("WS OPEN"); });
-  ws.addEventListener("error",function(){ log("WS ERROR"); });
-  ws.addEventListener("close",function(e){ log("WS CLOSE code="+e.code+" reason="+e.reason); });
-  return ws;
+  try{
+    var a=new URL(url,location.href);
+    var p=a.pathname;
+    if(p.indexOf(PFX)===0) p=p.slice(PFX.length);
+    a.host=H; a.protocol=P; a.pathname=p;
+    url=a.toString();
+  }catch(e){}
+  return protocols!==undefined?new O(url,protocols):new O(url);
 };
 window.WebSocket.prototype=O.prototype;
 })();</script>`;
