@@ -1,21 +1,21 @@
 // lib/browserUse.ts
 // Real browser automation via Browserless — connects a remote Chrome over
 // CDP with the user's own token, gives the agent goto/click/type/scroll
-// actions (same loop shape as Computer Use), plus a live watchable URL.
+// actions, plus a live watchable URL.
 //
-// SESSION ACROSS SERVERLESS REQUESTS: a Vercel function can't hold a live
-// connection open between requests. Fix: right after opening the browser,
-// call Browserless's own `Browserless.reconnect` CDP command — it hands
-// back a session-specific browserWSEndpoint that survives a disconnect
-// for a given timeout. We store THAT server-side (it has the token in
-// it) in Firestore keyed by a random session id, and only ever give the
-// browser that random id.
+// SESSION ACROSS SERVERLESS REQUESTS: right after opening the browser,
+// `Browserless.reconnect` hands back a session-specific browserWSEndpoint
+// that survives a disconnect for a given timeout — Browserless caps this
+// at 120000ms (2 min) max, so a truly idle session does expire quickly.
+// To keep an ACTIVELY-used session alive, every action call re-issues
+// Browserless.reconnect and refreshes the stored endpoint before
+// disconnecting, effectively renewing the timeout on each step.
 
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { adminDb } from "@/lib/firebaseAdmin";
 
 const REGION = "production-sfo.browserless.io";
-const SESSION_TIMEOUT_MS = 15 * 60 * 1000; // 15 min idle timeout
+const SESSION_TIMEOUT_MS = 110_000; // Browserless's hard cap is 120000ms
 
 export type BrowserAction =
   | { type: "screenshot" }
@@ -40,18 +40,24 @@ async function loadReconnectEndpoint(uid: string, sessionId: string): Promise<st
   return snap.data()!.reconnectEndpoint as string;
 }
 
-export async function startBrowserSession(uid: string, apiKey: string): Promise<{ sessionId: string; liveUrl: string }> {
-  const browser = await puppeteer.connect({ browserWSEndpoint: `wss://${REGION}/?token=${apiKey}` });
-  const page = await browser.newPage();
+/** Calls Browserless.reconnect on an already-connected browser and
+ * returns a fresh, token-bearing endpoint good for another
+ * SESSION_TIMEOUT_MS after this connection drops. */
+async function refreshReconnectEndpoint(browser: Browser, apiKey: string): Promise<string> {
+  const page = (await browser.pages())[0] || (await browser.newPage());
   const cdp = await page.createCDPSession();
-
   const { error, browserWSEndpoint } = (await cdp.send("Browserless.reconnect" as any, {
     timeout: SESSION_TIMEOUT_MS,
   } as any)) as { error?: string; browserWSEndpoint?: string };
   if (error || !browserWSEndpoint) throw new Error(error || "Browserless didn't return a reconnect endpoint.");
+  return `${browserWSEndpoint}?token=${apiKey}`;
+}
 
-  const reconnectEndpoint = `${browserWSEndpoint}?token=${apiKey}`;
-  const browserId = browserWSEndpoint.split("/").pop()!;
+export async function startBrowserSession(uid: string, apiKey: string): Promise<{ sessionId: string; liveUrl: string }> {
+  const browser = await puppeteer.connect({ browserWSEndpoint: `wss://${REGION}/?token=${apiKey}` });
+
+  const reconnectEndpoint = await refreshReconnectEndpoint(browser, apiKey);
+  const browserId = reconnectEndpoint.split("?")[0].split("/").pop()!;
 
   const sessionId = crypto.randomUUID();
   await saveSession(uid, sessionId, reconnectEndpoint);
@@ -65,14 +71,15 @@ export async function startBrowserSession(uid: string, apiKey: string): Promise<
     // Live view is a nice-to-have — the agent can still work without it.
   }
 
-  await browser.disconnect(); // frees this request's connection; remote browser stays up (reconnect timeout above)
+  await browser.disconnect();
   return { sessionId, liveUrl };
 }
 
 export async function runBrowserAction(
   uid: string,
   sessionId: string,
-  action: BrowserAction
+  action: BrowserAction,
+  apiKey: string
 ): Promise<{ screenshotBase64?: string; text?: string }> {
   const reconnectEndpoint = await loadReconnectEndpoint(uid, sessionId);
   const browser: Browser = await puppeteer.connect({ browserWSEndpoint: reconnectEndpoint });
@@ -98,6 +105,9 @@ export async function runBrowserAction(
         break;
       case "extractText": {
         const text = await page.evaluate(() => document.body.innerText || "");
+        // Renew the session's timeout since it's actively being used.
+        const fresh = await refreshReconnectEndpoint(browser, apiKey);
+        await saveSession(uid, sessionId, fresh);
         return { text: text.slice(0, 4000) };
       }
       case "wait":
@@ -108,6 +118,9 @@ export async function runBrowserAction(
     }
 
     const shot = await page.screenshot({ encoding: "base64", type: "jpeg", quality: 55 });
+    // Renew the session's timeout on every real action.
+    const fresh = await refreshReconnectEndpoint(browser, apiKey);
+    await saveSession(uid, sessionId, fresh);
     return { screenshotBase64: shot as string };
   } finally {
     await browser.disconnect();
@@ -118,7 +131,7 @@ export async function stopBrowserSession(uid: string, sessionId: string): Promis
   try {
     const reconnectEndpoint = await loadReconnectEndpoint(uid, sessionId);
     const browser = await puppeteer.connect({ browserWSEndpoint: reconnectEndpoint });
-    await browser.close(); // real close — frees the Browserless slot
+    await browser.close();
   } catch {
     // best-effort
   } finally {
