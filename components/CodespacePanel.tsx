@@ -2,24 +2,26 @@
 
 // components/CodespacePanel.tsx
 // Shows the code the Developer Agent has produced, extracted and
-// de-duplicated by filename (see lib/codeExtract.ts — this is what fixes
-// old/new code getting mixed together when a file is updated). Includes:
-// syntax highlighting, a folder-grouped file list, per-file Copy and
-// Download, a "Download all" zip of the whole project, and a live
-// Preview tab for HTML/CSS/JS and React projects.
+// de-duplicated by filename (see lib/codeExtract.ts). Includes: syntax
+// highlighting, a folder-grouped file list, per-file Copy and Download, a
+// "Download all" zip of the whole project, a live Preview tab for
+// HTML/CSS/JS and React projects, and a real Publish button (Vercel or
+// Netlify) that puts the project on a live URL using the user's own
+// token — this replaced the old E2B "Run in Cloud" sandbox entirely.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { CodeFile } from "@/lib/codeExtract";
 import type { Attachment } from "@/lib/chatClient";
 import { buildPreviewHtml, listHtmlPages } from "@/lib/preview";
 import { highlightCode } from "@/lib/syntaxHighlight";
-import { startCloudPreview, waitForCloudPreview, stopCloudPreview } from "@/lib/sandboxClient";
+import { publishProject } from "@/lib/publishClient";
 
 type Props = {
   open: boolean;
   onClose: () => void;
   files: CodeFile[];
   assets?: Attachment[];
+  openFileId?: string | null;
 };
 
 function groupByFolder(files: CodeFile[]): Map<string, CodeFile[]> {
@@ -47,18 +49,27 @@ function triggerDownload(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export default function CodespacePanel({ open, onClose, files, assets = [] }: Props) {
+export default function CodespacePanel({ open, onClose, files, assets = [], openFileId = null }: Props) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"code" | "preview">("code");
   const [copied, setCopied] = useState(false);
   const [zipping, setZipping] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [previewPage, setPreviewPage] = useState<string | null>(null);
-  const [cloudUrl, setCloudUrl] = useState<string | null>(null);
-  const [cloudSandboxId, setCloudSandboxId] = useState<string | null>(null);
-  const [cloudLoading, setCloudLoading] = useState(false);
-  const [cloudError, setCloudError] = useState<string | null>(null);
-  const [cloudLog, setCloudLog] = useState<string>("");
+
+  // Publish (Vercel / Netlify)
+  const [publishing, setPublishing] = useState(false);
+  const [publishMenuOpen, setPublishMenuOpen] = useState(false);
+  const [publishedUrl, setPublishedUrl] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
+
+  // Jump straight to a specific file when opened from a chat file-card.
+  useEffect(() => {
+    if (open && openFileId) {
+      setActiveId(openFileId);
+      setViewMode("code");
+    }
+  }, [open, openFileId]);
 
   if (!open) return null;
 
@@ -78,32 +89,20 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
     }
   }
 
-  async function handleRunInCloud() {
+  async function handlePublish(target: "vercel" | "netlify") {
     if (files.length === 0) return;
-    setCloudLoading(true);
-    setCloudError(null);
-    setCloudLog("");
-    setCloudUrl(null);
-    if (cloudSandboxId) await stopCloudPreview(cloudSandboxId);
+    setPublishMenuOpen(false);
+    setPublishing(true);
+    setPublishError(null);
+    setPublishedUrl(null);
     try {
-      const { sandboxId } = await startCloudPreview(files);
-      setCloudSandboxId(sandboxId);
-      setViewMode("preview");
-      const previewUrl = await waitForCloudPreview(sandboxId, (log) => setCloudLog(log));
-      setCloudUrl(previewUrl);
+      const { url } = await publishProject(target, files);
+      setPublishedUrl(url);
     } catch (err) {
-      setCloudError(err instanceof Error ? err.message : "Failed to start the cloud sandbox.");
+      setPublishError(err instanceof Error ? err.message : "Publish failed.");
     } finally {
-      setCloudLoading(false);
+      setPublishing(false);
     }
-  }
-
-  function handleCloseCloud() {
-    if (cloudSandboxId) stopCloudPreview(cloudSandboxId);
-    setCloudSandboxId(null);
-    setCloudUrl(null);
-    setCloudLog("");
-    setCloudError(null);
   }
 
   async function handleDownloadFile() {
@@ -140,7 +139,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
             <h2 className="text-sm font-medium">Codespace — Developer Agent</h2>
           </div>
           <div className="flex items-center gap-2">
-            {(previewHtml || cloudUrl) && files.length > 0 && (
+            {previewHtml && files.length > 0 && (
               <div className="flex overflow-hidden rounded-md border border-white/15 text-xs">
                 <button
                   onClick={() => setViewMode("code")}
@@ -157,13 +156,34 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
               </div>
             )}
             {files.length > 0 && (
-              <button
-                onClick={handleRunInCloud}
-                disabled={cloudLoading}
-                className="focus-ring rounded-md border border-clay/30 bg-clay/10 px-2.5 py-1 text-xs font-medium text-clay transition-colors hover:bg-clay/20 disabled:opacity-50"
-              >
-                {cloudLoading ? "Starting sandbox..." : cloudUrl ? "Restart in Cloud" : "Run in Cloud"}
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setPublishMenuOpen((o) => !o)}
+                  disabled={publishing}
+                  className="focus-ring rounded-md border border-moss/30 bg-moss/10 px-2.5 py-1 text-xs font-medium text-moss transition-colors hover:bg-moss/20 disabled:opacity-50"
+                >
+                  {publishing ? "Publishing..." : "Publish"}
+                </button>
+                {publishMenuOpen && (
+                  <div
+                    className="absolute right-0 top-full z-20 mt-1 w-44 rounded-md border border-white/15 bg-[#2a2723] p-1 shadow-xl"
+                    onMouseLeave={() => setPublishMenuOpen(false)}
+                  >
+                    <button
+                      onClick={() => handlePublish("vercel")}
+                      className="block w-full rounded px-3 py-2 text-left text-xs text-cream/80 hover:bg-white/10"
+                    >
+                      Publish to Vercel
+                    </button>
+                    <button
+                      onClick={() => handlePublish("netlify")}
+                      className="block w-full rounded px-3 py-2 text-left text-xs text-cream/80 hover:bg-white/10"
+                    >
+                      Publish to Netlify
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
             {files.length > 0 && (
               <button
@@ -200,53 +220,30 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
             The Developer Agent hasn&apos;t written any code in this chat yet.
             Ask it to build something and files will show up here.
           </div>
-        ) : viewMode === "preview" && cloudLoading && !cloudUrl ? (
-          <div className="flex h-full w-full flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-clay" />
-            <p className="text-sm text-cream/70">Starting your cloud sandbox — installing dependencies and starting the server...</p>
-            {cloudLog && (
-              <pre className="mt-2 max-h-40 w-full max-w-lg overflow-auto rounded-md bg-black/40 p-3 text-left text-[11px] text-cream/50">
-                {cloudLog}
-              </pre>
-            )}
-          </div>
-        ) : viewMode === "preview" && (cloudUrl || previewHtml) ? (
+        ) : viewMode === "preview" && previewHtml ? (
           <div className="flex h-full w-full flex-1 flex-col">
-            {cloudUrl ? (
+            {htmlPages.length > 1 && (
               <div className="flex items-center gap-2 border-b border-white/10 bg-[#1e1c19] px-4 py-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-moss" />
-                <span className="text-xs text-cream/60">Live cloud sandbox — real server, any language</span>
-                <a href={cloudUrl} target="_blank" rel="noreferrer" className="text-xs text-clay hover:underline">
-                  Open in new tab
-                </a>
-                <button onClick={handleCloseCloud} className="ml-auto text-xs text-cream/40 hover:text-cream">
-                  Stop sandbox
-                </button>
+                <span className="text-xs text-cream/50">Page:</span>
+                <select
+                  value={previewPage || htmlPages.find((p) => /index\.html$/i.test(p)) || htmlPages[0]}
+                  onChange={(e) => setPreviewPage(e.target.value)}
+                  className="rounded-md border border-white/15 bg-[#2a2723] px-2 py-1 text-xs text-cream outline-none"
+                >
+                  {htmlPages.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-xs text-cream/30">
+                  Links between pages won't navigate here (no real server) — switch pages with this dropdown instead.
+                </span>
               </div>
-            ) : (
-              htmlPages.length > 1 && (
-                <div className="flex items-center gap-2 border-b border-white/10 bg-[#1e1c19] px-4 py-2">
-                  <span className="text-xs text-cream/50">Page:</span>
-                  <select
-                    value={previewPage || htmlPages.find((p) => /index\.html$/i.test(p)) || htmlPages[0]}
-                    onChange={(e) => setPreviewPage(e.target.value)}
-                    className="rounded-md border border-white/15 bg-[#2a2723] px-2 py-1 text-xs text-cream outline-none"
-                  >
-                    {htmlPages.map((p) => (
-                      <option key={p} value={p}>
-                        {p}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="text-xs text-cream/30">
-                    Links between pages won't navigate here (no real server) — switch pages with this dropdown instead.
-                  </span>
-                </div>
-              )
             )}
             <iframe
               title="Codespace preview"
-              {...(cloudUrl ? { src: cloudUrl } : { srcDoc: previewHtml! })}
+              srcDoc={previewHtml}
               sandbox="allow-scripts allow-modals allow-forms allow-same-origin"
               className="h-full w-full flex-1 border-0 bg-white"
             />
@@ -306,12 +303,21 @@ export default function CodespacePanel({ open, onClose, files, assets = [] }: Pr
           </div>
         )}
 
-        {cloudError && (
-          <p className="border-t border-white/10 bg-red-950/40 px-5 py-2 text-xs text-red-300">{cloudError}</p>
+        {publishedUrl && (
+          <p className="border-t border-white/10 bg-moss/10 px-5 py-2 text-xs text-moss">
+            Live at{" "}
+            <a href={publishedUrl} target="_blank" rel="noreferrer" className="underline">
+              {publishedUrl}
+            </a>
+          </p>
         )}
-        {files.length > 0 && !previewHtml && !cloudUrl && viewMode === "code" && (
+        {publishError && (
+          <p className="border-t border-white/10 bg-red-950/40 px-5 py-2 text-xs text-red-300">{publishError}</p>
+        )}
+        {files.length > 0 && !previewHtml && viewMode === "code" && !publishedUrl && !publishError && (
           <p className="border-t border-white/10 px-5 py-2 text-xs text-cream/35">
-            No static preview for this file type — click <strong className="text-clay">Run in Cloud</strong> above to run it for real in a live sandbox instead (works for any language).
+            No static preview for this file type — hit{" "}
+            <strong className="text-clay">Publish</strong> above to put it on a real live URL instead.
           </p>
         )}
       </div>
