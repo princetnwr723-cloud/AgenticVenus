@@ -56,7 +56,13 @@ async function refreshReconnectEndpoint(browser: Browser, apiKey: string): Promi
 export async function startBrowserSession(uid: string, apiKey: string): Promise<{ sessionId: string; liveUrl: string }> {
   const browser = await puppeteer.connect({ browserWSEndpoint: `wss://${REGION}/?token=${apiKey}` });
 
-  const reconnectEndpoint = await refreshReconnectEndpoint(browser, apiKey);
+  let reconnectEndpoint: string;
+  try {
+    reconnectEndpoint = await refreshReconnectEndpoint(browser, apiKey);
+  } catch (err) {
+    await browser.disconnect();
+    throw new Error(`Couldn't establish a reusable session: ${err instanceof Error ? err.message : "unknown error"}`);
+  }
   const browserId = reconnectEndpoint.split("?")[0].split("/").pop()!;
 
   const sessionId = crypto.randomUUID();
@@ -66,12 +72,25 @@ export async function startBrowserSession(uid: string, apiKey: string): Promise<
   try {
     const liveRes = await fetch(`https://${REGION}/browser/${browserId}/live?token=${apiKey}`, { method: "POST" });
     const liveData = await liveRes.json().catch(() => null);
+    if (!liveRes.ok) {
+      console.error("[browserUse] live endpoint failed:", liveRes.status, liveData);
+    }
     liveUrl = liveData?.liveURL || liveData?.url || liveData?.liveUrl || "";
-  } catch {
-    // Live view is a nice-to-have — the agent can still work without it.
+  } catch (err) {
+    console.error("[browserUse] live endpoint threw:", err);
   }
 
   await browser.disconnect();
+
+  if (!liveUrl) {
+    // Don't fail the whole session over a missing live view — the agent
+    // can still work headlessly — but make sure the caller (and the UI)
+    // knows explicitly, instead of silently showing nothing.
+    throw new Error(
+      "Browser session started, but Browserless didn't return a live view URL — check that your token's plan includes live/interactable sessions."
+    );
+  }
+
   return { sessionId, liveUrl };
 }
 
