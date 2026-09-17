@@ -35,6 +35,8 @@ import { getAgentLessons, buildLessonsContext, reflectAndLearn } from "@/lib/age
 import SkillsPanel from "@/components/SkillsPanel";
 import PricingPanel from "@/components/PricingPanel";
 import { listInstalledSkillIds, buildInstalledSkillsContext } from "@/lib/skillConnections";
+import { listCustomSkills } from "@/lib/customSkills";
+import type { Skill } from "@/lib/skills";
 import { getUserPlanId, canSendMessage, incrementTodayUsage } from "@/lib/userPlan";
 import { getPlan, type PlanId } from "@/lib/plans";
 import { uploadAssetFile } from "@/lib/uploadAsset";
@@ -68,7 +70,7 @@ export default function HomePage() {
   const router = useRouter();
 
   const [checkingConnection, setCheckingConnection] = useState(true);
-  const [connected, setConnected] = useState<Provider | null>(null); // sidebar default
+  const [connected, setConnected] = useState<Provider | null>(null);
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [connections, setConnections] = useState<SavedConnection[]>([]);
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
@@ -83,7 +85,6 @@ export default function HomePage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [forceSelect, setForceSelect] = useState(false);
 
-  // Feature panels
   const [schedulerOpen, setSchedulerOpen] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const [highlightToolId, setHighlightToolId] = useState<string | null>(null);
@@ -94,20 +95,16 @@ export default function HomePage() {
   const [codespaceOpenFileId, setCodespaceOpenFileId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Agent Team
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
   const [classifying, setClassifying] = useState(false);
 
-  // Tool awareness — a pending prompt to connect a needed tool
   const [toolNeed, setToolNeed] = useState<ToolNeed | null>(null);
   const [pendingTaskAfterConnect, setPendingTaskAfterConnect] = useState<string | null>(null);
 
-  // Chat persistence
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [chatId, setChatId] = useState<string | null>(null);
   const [telegram, setTelegram] = useState<ChatRecord["telegram"]>(null);
 
-  // Personalized greeting
   const [greeting, setGreeting] = useState<string | null>(null);
   const [generatingGreeting, setGeneratingGreeting] = useState(false);
 
@@ -122,12 +119,12 @@ export default function HomePage() {
   const [ceoMode, setCeoMode] = useState(false);
   const [ceoRunning, setCeoRunning] = useState(false);
   const [installedSkillIds, setInstalledSkillIds] = useState<string[]>([]);
+  const [customSkills, setCustomSkills] = useState<Skill[]>([]);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [pricingOpen, setPricingOpen] = useState(false);
   const [planId, setPlanId] = useState<PlanId>("free");
   const [usageLimitError, setUsageLimitError] = useState<string | null>(null);
 
-  // Cloud Computer (Daytona)
   const [computerViewOpen, setComputerViewOpen] = useState(false);
   const [computerStreamUrl, setComputerStreamUrl] = useState<string | null>(null);
   const [computerSandboxId, setComputerSandboxId] = useState<string | null>(null);
@@ -135,7 +132,6 @@ export default function HomePage() {
   const [computerStepLog, setComputerStepLog] = useState<string[]>([]);
   const [computerRunning, setComputerRunning] = useState(false);
 
-  // Browser (Browserless)
   const [browserViewOpen, setBrowserViewOpen] = useState(false);
   const [browserLiveUrl, setBrowserLiveUrl] = useState<string | null>(null);
   const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
@@ -164,13 +160,14 @@ export default function HomePage() {
     if (!user) return;
     (async () => {
       try {
-        const [existing, allConns, dna, toolIds, servers, skillIds, userPlanId, intKeys] = await Promise.all([
+        const [existing, allConns, dna, toolIds, servers, skillIds, custom, userPlanId, intKeys] = await Promise.all([
           getPrimaryConnection(user.uid),
           getAllConnections(user.uid),
           getBusinessDNA(user.uid),
           listConnectedPluginIds(user.uid),
           listMCPServers(user.uid),
           listInstalledSkillIds(user.uid),
+          listCustomSkills(user.uid),
           getUserPlanId(user.uid),
           getIntegrationKeys(user.uid),
         ]);
@@ -187,6 +184,7 @@ export default function HomePage() {
         setConnectedToolIds(toolIds);
         setMcpServers(servers);
         setInstalledSkillIds(skillIds);
+        setCustomSkills(custom);
         setPlanId(userPlanId);
         setIntegrationKeys(intKeys);
         await refreshChats();
@@ -209,8 +207,6 @@ export default function HomePage() {
     }
   }, []);
 
-  // After redirecting back from an MCP server's OAuth login, show what
-  // happened and refresh the connected-servers list.
   useEffect(() => {
     if (!user) return;
     const params = new URLSearchParams(window.location.search);
@@ -308,10 +304,6 @@ export default function HomePage() {
     return () => clearInterval(interval);
   }, [user, chatId, telegram?.botUsername, messages.length]);
 
-  // CEO Mode: every hour, the agent surveys whatever it has connected
-  // (email, MCP tools, etc.) and takes reasonable action on its own —
-  // reusing the exact same tool-orchestration pipeline as a normal
-  // message (processTask), so it can genuinely act, not just talk.
   useEffect(() => {
     if (!ceoMode || !chatId || !activeConnection) return;
     const CEO_SURVEY_PROMPT =
@@ -385,7 +377,6 @@ export default function HomePage() {
     await refreshChats();
   }
 
-  // ---------- Cloud Computer (Daytona) ----------
   async function handleStartComputer() {
     setComputerStarting(true);
     try {
@@ -394,9 +385,9 @@ export default function HomePage() {
       const idToken = await auth.currentUser?.getIdToken();
       setComputerStreamUrl(`/api/computer/view/${sandboxId}/${idToken}/vnc.html`);
     } catch (err) {
-    setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start computer."]);
+      setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start computer."]);
     } finally {
-    setComputerStarting(false);
+      setComputerStarting(false);
     }
   }
 
@@ -428,7 +419,6 @@ export default function HomePage() {
     }
   }
 
-  // ---------- Browser (Browserless) ----------
   async function handleStartBrowser() {
     setBrowserStarting(true);
     try {
@@ -489,7 +479,7 @@ export default function HomePage() {
     if (!fileList || fileList.length === 0) return;
     const TEXT_TYPES = ["text/plain", "text/markdown", "text/csv", "application/json"];
     const ASSET_EXT = /\.(glb|gltf|obj|mtl|fbx|stl|bin)$/i;
-    const MAX_SIZE = 800 * 1024; // 800KB — keeps Firestore doc size safe
+    const MAX_SIZE = 800 * 1024;
 
     for (const file of Array.from(fileList)) {
       if (ASSET_EXT.test(file.name)) {
@@ -570,7 +560,6 @@ export default function HomePage() {
       setChatId(currentChatId);
     }
 
-    // 0. Scheduling request? ("give me AI news daily at 10am")
     const intent = await detectScheduleIntent(provider.id, activeKey, task, model);
     if (intent) {
       const runAt = nextOccurrence(intent.time);
@@ -587,7 +576,6 @@ export default function HomePage() {
       return;
     }
 
-    // 0.5 Does this need a tool the agent doesn't have?
     const effectiveToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
     const need = await detectToolNeed(provider.id, activeKey, nextMessages, effectiveToolIds, model);
     if (need && !need.connected) {
@@ -597,13 +585,11 @@ export default function HomePage() {
       return;
     }
 
-    // 1. Boss agent decides which specialist should handle this task.
     setClassifying(true);
     const agent = await classifyAgent(provider.id, activeKey, task, model);
     setActiveAgent(agent);
     setClassifying(false);
 
-    // 1.5 If an MCP tool looks relevant, actually call it for real.
     let toolResultNote = "";
     if (mcpServers.length > 0) {
       const toolCall = await decideMcpToolCall(provider.id, activeKey, nextMessages, mcpServers, model);
@@ -621,7 +607,6 @@ export default function HomePage() {
       }
     }
 
-    // 1.6 Same idea, but for plugins with a real dedicated connection.
     if (effectiveToolIds.length > 0) {
       const planned = await decidePluginAction(provider.id, activeKey, nextMessages, connectedToolIds, model);
       if (planned) {
@@ -638,7 +623,6 @@ export default function HomePage() {
       }
     }
 
-    // 2. The chosen specialist answers for real.
     setSending(true);
     const toolNames = connectedToolNames(effectiveToolIds);
     const toolsContext =
@@ -646,10 +630,6 @@ export default function HomePage() {
         ? `You currently have access to these connected tools: ${toolNames.join(", ")}. If asked to do something with one of them, answer as if you used it. If asked to do something requiring a tool NOT in this list, tell the user they can connect it in Plugins, or through MCP Tools if it's not a built-in plugin.`
         : "You don't have any tools connected yet. If a request needs an external tool (email, calendar, etc.), tell the user to connect it in Plugins or MCP Tools.";
 
-    // Infrastructure-level tools (Computer, Browser, Publish) aren't part
-    // of the Plugins catalog, so the agent needs to be told about these
-    // separately — only mentioning the ones the user has actually
-    // configured a key for.
     const infraToolsContext = [
       integrationKeys.daytonaApiKey
         ? "You have a real cloud computer available (the Computer button) — if the user starts it, you can see the screen and click/type/scroll for real."
@@ -664,7 +644,7 @@ export default function HomePage() {
       .filter(Boolean)
       .join("\n");
 
-    const installedSkillsContext = buildInstalledSkillsContext(installedSkillIds);
+    const installedSkillsContext = buildInstalledSkillsContext(installedSkillIds, customSkills);
     const lessons = await getAgentLessons(user.uid, agent.id);
     const systemPrompt = [
       agent.systemPrompt,
@@ -730,7 +710,6 @@ export default function HomePage() {
       )}
 
       <section className="flex min-w-0 flex-1 flex-col">
-        {/* Top bar */}
         <div className="flex items-center justify-between border-b border-black/5 px-6 py-3">
           <span className="text-sm font-medium text-ink/70">
             {activeConnection ? `Chatting with ${activeConnection.provider.name}` : "Workspace"}
@@ -816,7 +795,6 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* Messages */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto bg-cream-dark/40 px-6 py-8">
           <div className="mx-auto flex max-w-3xl flex-col gap-6">
             {mcpBanner && (
@@ -908,7 +886,6 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* Composer */}
         <div className="border-t border-black/5 bg-cream px-6 py-4">
           {pendingAttachments.length > 0 && (
             <div className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
@@ -1051,6 +1028,7 @@ export default function HomePage() {
         open={skillsOpen}
         onClose={() => setSkillsOpen(false)}
         onInstalledChange={setInstalledSkillIds}
+        onCustomSkillsChange={setCustomSkills}
         onUpgrade={() => {
           setSkillsOpen(false);
           setPricingOpen(true);
