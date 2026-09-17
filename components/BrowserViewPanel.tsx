@@ -1,9 +1,10 @@
 "use client";
 
 // components/BrowserViewPanel.tsx
-// Same structure as ComputerViewPanel, but for a real remote Chrome via
-// Browserless. Any start/step error shows as a visible red banner at the
-// top instead of only appearing in the small scrolling step log below.
+// This panel is now optional for the agent — it can browse headlessly
+// without anyone opening it. When a session is running but the
+// Browserless plan doesn't support a live view, we say so plainly
+// instead of blocking, since the agent's actual work isn't affected.
 
 import { useState } from "react";
 
@@ -11,6 +12,7 @@ type Props = {
   open: boolean;
   onClose: () => void;
   liveUrl: string | null;
+  active: boolean; // a session is running, live view or not
   starting: boolean;
   onStart: () => void;
   onStop: () => void;
@@ -23,6 +25,7 @@ export default function BrowserViewPanel({
   open,
   onClose,
   liveUrl,
+  active,
   starting,
   onStart,
   onStop,
@@ -44,7 +47,7 @@ export default function BrowserViewPanel({
             <h2 className="text-sm font-medium">Browser — live view</h2>
           </div>
           <div className="flex items-center gap-2">
-            {liveUrl ? (
+            {active ? (
               <button onClick={onStop} className="rounded-md border border-white/15 px-2.5 py-1 text-xs text-cream/70 hover:bg-white/10 hover:text-cream">
                 Stop browser
               </button>
@@ -63,21 +66,29 @@ export default function BrowserViewPanel({
           </div>
         </div>
 
-        {lastError && !liveUrl && (
+        {lastError && (
           <p className="border-b border-red-900/50 bg-red-950/50 px-5 py-2.5 text-xs text-red-300">{lastError}</p>
         )}
 
         {liveUrl ? (
           <iframe title="Browser live view" src={liveUrl} className="h-full w-full flex-1 border-0 bg-white" />
+        ) : active ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
+            <p className="text-sm text-cream/60">
+              The browser is running and the agent can use it fully — your Browserless plan just doesn't
+              include a live/interactable view, so there's nothing to show here.
+            </p>
+            <p className="text-xs text-cream/35">Upgrade your Browserless plan to watch the session live.</p>
+          </div>
         ) : (
           <div className="flex flex-1 items-center justify-center px-8 text-center text-sm text-cream/40">
             {starting
               ? "Connecting to Browserless..."
-              : "Start a browser session to give the agent real web access."}
+              : "The agent starts a browser session automatically whenever a task needs one — this panel just lets you watch, if your plan supports it."}
           </div>
         )}
 
-        {liveUrl && onRunTask && (
+        {(active || onRunTask) && (
           <div className="flex items-center gap-2 border-t border-white/10 px-4 py-3">
             <input
               value={taskInput}
@@ -88,7 +99,7 @@ export default function BrowserViewPanel({
             <button
               onClick={() => {
                 if (taskInput.trim()) {
-                  onRunTask(taskInput.trim());
+                  onRunTask?.(taskInput.trim());
                   setTaskInput("");
                 }
               }}
