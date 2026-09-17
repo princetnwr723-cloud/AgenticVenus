@@ -2,10 +2,8 @@
 
 // components/BrowserViewPanel.tsx
 // Same structure as ComputerViewPanel, but for a real remote Chrome via
-// Browserless — live view + a task box that runs the browser agent loop
-// (see lib/browserClient.ts's runBrowserTask). Browserless's live-session
-// URL is embed-friendly on its own, so unlike Computer Use this doesn't
-// need a proxy route — it's just dropped straight into the iframe src.
+// Browserless. Any start/step error shows as a visible red banner at the
+// top instead of only appearing in the small scrolling step log below.
 
 import { useState } from "react";
 
@@ -35,6 +33,8 @@ export default function BrowserViewPanel({
   const [taskInput, setTaskInput] = useState("");
   if (!open) return null;
 
+  const lastError = [...stepLog].reverse().find((s) => /error|fail|couldn't|failed/i.test(s));
+
   return (
     <div className="animate-fade-in fixed inset-0 z-40 flex justify-end bg-ink/30" onClick={onClose}>
       <div className="animate-scale-in flex h-full w-full max-w-2xl flex-col bg-[#1e1c19] text-cream shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -62,6 +62,10 @@ export default function BrowserViewPanel({
             </button>
           </div>
         </div>
+
+        {lastError && !liveUrl && (
+          <p className="border-b border-red-900/50 bg-red-950/50 px-5 py-2.5 text-xs text-red-300">{lastError}</p>
+        )}
 
         {liveUrl ? (
           <iframe title="Browser live view" src={liveUrl} className="h-full w-full flex-1 border-0 bg-white" />
