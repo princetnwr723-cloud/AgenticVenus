@@ -392,7 +392,9 @@ export default function HomePage() {
       const { sandboxId } = await startComputerSession();
       setComputerSandboxId(sandboxId);
       const idToken = await auth.currentUser?.getIdToken();
-      setComputerStreamUrl(`/api/computer/view/${sandboxId}/${idToken}/vnc.html`);
+      const res = await fetch(`/api/computer/signed-url?sandboxId=${sandboxId}&token=${idToken}`);
+      const { url } = await res.json();
+      setComputerStreamUrl(url); // raw Daytona URL, no proxy
     } catch (err) {
       setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start computer."]);
     } finally {
