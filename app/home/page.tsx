@@ -19,8 +19,14 @@ import SettingsPanel from "@/components/SettingsPanel";
 import ToolConnectPrompt from "@/components/ToolConnectPrompt";
 import ComputerViewPanel from "@/components/ComputerViewPanel";
 import BrowserViewPanel from "@/components/BrowserViewPanel";
+import AgentStatusLine from "@/components/AgentStatusLine";
+import PlanApprovalCard from "@/components/PlanApprovalCard";
 import { startComputerSession, stopComputerSession, runComputerTask } from "@/lib/computerClient";
 import { startBrowserSession, stopBrowserSession, runBrowserTask } from "@/lib/browserClient";
+import { decideAutoTools, type AutoToolDecision } from "@/lib/autoTools";
+import { generateTaskPlan } from "@/lib/taskPlanner";
+import { importSkillFromUrl } from "@/lib/skillImportClient";
+import { saveCustomSkill } from "@/lib/customSkills";
 import FilesPanel from "@/components/FilesPanel";
 import {
   getPrimaryConnection,
@@ -65,6 +71,14 @@ import {
   type ChatRecord,
 } from "@/lib/chats";
 
+type PendingPlan = {
+  task: string;
+  attachments: Attachment[];
+  autoDecision: AutoToolDecision;
+  steps: string[];
+  chatId: string;
+};
+
 export default function HomePage() {
   const { user, loading } = useAuth();
   const router = useRouter();
@@ -97,6 +111,9 @@ export default function HomePage() {
 
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
   const [classifying, setClassifying] = useState(false);
+  const [agentStatus, setAgentStatus] = useState<string | null>(null);
+  const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
+  const [planBusy, setPlanBusy] = useState(false);
 
   const [toolNeed, setToolNeed] = useState<ToolNeed | null>(null);
   const [pendingTaskAfterConnect, setPendingTaskAfterConnect] = useState<string | null>(null);
@@ -131,6 +148,7 @@ export default function HomePage() {
   const [computerStarting, setComputerStarting] = useState(false);
   const [computerStepLog, setComputerStepLog] = useState<string[]>([]);
   const [computerRunning, setComputerRunning] = useState(false);
+  const computerAutoStarted = useRef(false);
 
   const [browserViewOpen, setBrowserViewOpen] = useState(false);
   const [browserLiveUrl, setBrowserLiveUrl] = useState<string | null>(null);
@@ -138,6 +156,7 @@ export default function HomePage() {
   const [browserStarting, setBrowserStarting] = useState(false);
   const [browserStepLog, setBrowserStepLog] = useState<string[]>([]);
   const [browserRunning, setBrowserRunning] = useState(false);
+  const browserAutoStarted = useRef(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -291,7 +310,7 @@ export default function HomePage() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages, sending]);
+  }, [messages, sending, pendingPlan]);
 
   useEffect(() => {
     if (!user || !chatId || !telegram?.botUsername) return;
@@ -349,6 +368,7 @@ export default function HomePage() {
     setTelegram(null);
     setCeoMode(false);
     setToolNeed(null);
+    setPendingPlan(null);
     setActiveProviderId(connected?.id ?? null);
   }
 
@@ -363,6 +383,7 @@ export default function HomePage() {
     setTelegram(chat.telegram ?? null);
     setCeoMode(!!chat.ceoMode);
     setToolNeed(null);
+    setPendingPlan(null);
     setGreeting(null);
     setError(null);
   }
@@ -377,6 +398,7 @@ export default function HomePage() {
     await refreshChats();
   }
 
+  // ---------- Manual Cloud Computer controls (panel) ----------
   async function handleStartComputer() {
     setComputerStarting(true);
     try {
@@ -419,12 +441,13 @@ export default function HomePage() {
     }
   }
 
+  // ---------- Manual Browser controls (panel) ----------
   async function handleStartBrowser() {
     setBrowserStarting(true);
     try {
       const { sessionId, liveUrl } = await startBrowserSession();
       setBrowserSessionId(sessionId);
-      setBrowserLiveUrl(liveUrl);
+      setBrowserLiveUrl(liveUrl || null);
     } catch (err) {
       setBrowserStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start browser."]);
     } finally {
@@ -529,6 +552,43 @@ export default function HomePage() {
     await processTask(task, attachments);
   }
 
+  /** Agent installs a skill directly from a link it found in chat — no
+   * manual Skills-panel step needed. */
+  async function handleAutoInstallSkill(url: string, nextMessages: ChatMessage[], targetChatId: string) {
+    if (!user) return;
+    setAgentStatus(`📦 Installing skill from ${url}...`);
+    try {
+      const parsed = await importSkillFromUrl(url);
+      const skill: Skill = {
+        id: parsed.id,
+        name: parsed.name,
+        category: "writing",
+        description: parsed.description,
+        color: "#8A8578",
+        instructions: parsed.instructions,
+      };
+      await saveCustomSkill(user.uid, skill, url);
+      setCustomSkills((prev) => [...prev.filter((s) => s.id !== skill.id), skill]);
+      const confirmMsg: ChatMessage = {
+        role: "assistant",
+        content: `Installed the **${skill.name}** skill from that link — I'll apply it automatically whenever it's relevant from now on.`,
+      };
+      const finalMessages = [...nextMessages, confirmMsg];
+      setMessages(finalMessages);
+      await persist(finalMessages, targetChatId, activeAgent?.id, activeConnection?.provider.id);
+    } catch (err) {
+      const errMsg: ChatMessage = {
+        role: "assistant",
+        content: `I couldn't install a skill from that link: ${err instanceof Error ? err.message : "unknown error"}.`,
+      };
+      const finalMessages = [...nextMessages, errMsg];
+      setMessages(finalMessages);
+      await persist(finalMessages, targetChatId, activeAgent?.id, activeConnection?.provider.id);
+    } finally {
+      setAgentStatus(null);
+    }
+  }
+
   async function processTask(task: string, attachments: Attachment[] = []) {
     if (!activeConnection || !user) {
       setForceSelect(true);
@@ -553,6 +613,7 @@ export default function HomePage() {
     setError(null);
     setGreeting(null);
     setToolNeed(null);
+    setPendingPlan(null);
 
     let currentChatId = chatId;
     if (!currentChatId) {
@@ -560,6 +621,7 @@ export default function HomePage() {
       setChatId(currentChatId);
     }
 
+    // 0. Scheduling request?
     const intent = await detectScheduleIntent(provider.id, activeKey, task, model);
     if (intent) {
       const runAt = nextOccurrence(intent.time);
@@ -576,6 +638,7 @@ export default function HomePage() {
       return;
     }
 
+    // 0.5 Does this need a catalog Plugin/MCP tool that isn't connected?
     const effectiveToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
     const need = await detectToolNeed(provider.id, activeKey, nextMessages, effectiveToolIds, model);
     if (need && !need.connected) {
@@ -585,12 +648,66 @@ export default function HomePage() {
       return;
     }
 
+    // 0.6 Does this need Browser / Computer / a skill install — decided
+    // by the agent itself, no button-pressing required.
+    const autoDecision = await decideAutoTools(
+      provider.id,
+      activeKey,
+      task,
+      !!integrationKeys.browserlessApiKey,
+      !!integrationKeys.daytonaApiKey,
+      model
+    );
+
+    if (autoDecision.installSkillUrl) {
+      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+      await handleAutoInstallSkill(autoDecision.installSkillUrl, nextMessages, currentChatId);
+      return;
+    }
+
+    if (autoDecision.needsBrowser || autoDecision.needsComputer) {
+      // Real-world action tasks get a short plan shown for approval
+      // first — a genuinely connected Plugin/MCP action (handled later
+      // in executeTask) always runs directly, no gate needed.
+      const toolsSummary = [
+        autoDecision.needsBrowser ? "a real web browser (navigate, click, type, read pages)" : null,
+        autoDecision.needsComputer ? "a real cloud desktop computer" : null,
+      ]
+        .filter(Boolean)
+        .join(" and ");
+      const plan = await generateTaskPlan(provider.id, activeKey, task, toolsSummary, model);
+      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+      if (plan) {
+        setPendingPlan({ task, attachments, autoDecision, steps: plan.steps, chatId: currentChatId });
+        return;
+      }
+      // If planning itself failed, just proceed directly rather than blocking.
+    }
+
+    await executeTask(task, attachments, currentChatId, autoDecision);
+  }
+
+  async function executeTask(
+    task: string,
+    attachments: Attachment[],
+    currentChatId: string,
+    autoDecision: AutoToolDecision
+  ) {
+    if (!activeConnection || !user) return;
+    const { provider, apiKey: activeKey, model } = activeConnection;
+    const nextMessages = messages.some((m) => m.role === "user" && m.content === task)
+      ? messages
+      : [...messages, { role: "user" as const, content: task, ...(attachments.length ? { attachments } : {}) }];
+
+    // 1. Boss agent decides which specialist should handle this task.
     setClassifying(true);
     const agent = await classifyAgent(provider.id, activeKey, task, model);
     setActiveAgent(agent);
     setClassifying(false);
 
     let toolResultNote = "";
+
+    // 1.5 MCP tool — runs directly, no approval gate.
     if (mcpServers.length > 0) {
       const toolCall = await decideMcpToolCall(provider.id, activeKey, nextMessages, mcpServers, model);
       if (toolCall) {
@@ -601,13 +718,14 @@ export default function HomePage() {
         } catch (err) {
           toolResultNote = `You attempted to use the "${toolCall.toolName}" tool but the call failed: ${
             err instanceof Error ? err.message : "unknown error"
-          }. Tell the user plainly that the tool call failed and why, so they can fix it (e.g. a missing API key, or the request needs more specific details).`;
+          }.`;
         }
         setUsingMcpTool(null);
       }
     }
 
-    if (effectiveToolIds.length > 0) {
+    // 1.6 Connected plugin action — also runs directly.
+    if (effectiveConnectedToolIds(connectedToolIds, mcpServers).length > 0) {
       const planned = await decidePluginAction(provider.id, activeKey, nextMessages, connectedToolIds, model);
       if (planned) {
         setUsingPluginAction(planned.actionName);
@@ -617,14 +735,75 @@ export default function HomePage() {
         } catch (err) {
           toolResultNote += `\n\nYou attempted "${planned.actionName}" but it failed: ${
             err instanceof Error ? err.message : "unknown error"
-          }. Tell the user plainly what went wrong.`;
+          }.`;
         }
         setUsingPluginAction(null);
       }
     }
 
+    // 1.7 Autonomous Browser use — starts and stops itself if this task
+    // was the reason it opened, so the user never has to press a button.
+    if (autoDecision.needsBrowser) {
+      let sid = browserSessionId;
+      let autoStarted = false;
+      setAgentStatus("🌐 Starting the browser...");
+      try {
+        if (!sid) {
+          const started = await startBrowserSession();
+          sid = started.sessionId;
+          setBrowserSessionId(sid);
+          setBrowserLiveUrl(started.liveUrl || null);
+          autoStarted = true;
+          browserAutoStarted.current = true;
+        }
+        const summary = await runBrowserTask(provider.id, activeKey, sid, task, model, (s) => setAgentStatus(`🌐 ${s}`));
+        toolResultNote += `\n\nYou just used the browser and accomplished: ${summary}\n\nMention what you found/did naturally in your reply.`;
+      } catch (err) {
+        toolResultNote += `\n\nYou tried to use the browser but it failed: ${err instanceof Error ? err.message : "unknown error"}. Tell the user plainly.`;
+      } finally {
+        if (autoStarted && browserAutoStarted.current) {
+          await stopBrowserSession(sid!);
+          setBrowserSessionId(null);
+          setBrowserLiveUrl(null);
+          browserAutoStarted.current = false;
+        }
+        setAgentStatus(null);
+      }
+    }
+
+    // 1.8 Autonomous Computer use — same pattern.
+    if (autoDecision.needsComputer) {
+      let sbx = computerSandboxId;
+      let autoStarted = false;
+      setAgentStatus("🖥️ Starting the computer...");
+      try {
+        if (!sbx) {
+          const started = await startComputerSession();
+          sbx = started.sandboxId;
+          setComputerSandboxId(sbx);
+          const idToken = await auth.currentUser?.getIdToken();
+          setComputerStreamUrl(`/api/computer/view/${sbx}/${idToken}/vnc.html`);
+          autoStarted = true;
+          computerAutoStarted.current = true;
+        }
+        const summary = await runComputerTask(provider.id, activeKey, sbx, task, model, (s) => setAgentStatus(`🖥️ ${s}`));
+        toolResultNote += `\n\nYou just used the computer and accomplished: ${summary}\n\nMention what you did naturally in your reply.`;
+      } catch (err) {
+        toolResultNote += `\n\nYou tried to use the computer but it failed: ${err instanceof Error ? err.message : "unknown error"}. Tell the user plainly.`;
+      } finally {
+        if (autoStarted && computerAutoStarted.current) {
+          await stopComputerSession(sbx!);
+          setComputerSandboxId(null);
+          setComputerStreamUrl(null);
+          computerAutoStarted.current = false;
+        }
+        setAgentStatus(null);
+      }
+    }
+
+    // 2. The chosen specialist answers for real.
     setSending(true);
-    const toolNames = connectedToolNames(effectiveToolIds);
+    const toolNames = connectedToolNames(effectiveConnectedToolIds(connectedToolIds, mcpServers));
     const toolsContext =
       toolNames.length > 0
         ? `You currently have access to these connected tools: ${toolNames.join(", ")}. If asked to do something with one of them, answer as if you used it. If asked to do something requiring a tool NOT in this list, tell the user they can connect it in Plugins, or through MCP Tools if it's not a built-in plugin.`
@@ -632,10 +811,10 @@ export default function HomePage() {
 
     const infraToolsContext = [
       integrationKeys.daytonaApiKey
-        ? "You have a real cloud computer available (the Computer button) — if the user starts it, you can see the screen and click/type/scroll for real."
+        ? "You have real, autonomous access to a cloud computer — you decide yourself when a task needs it and start/stop it without the user pressing any button."
         : null,
       integrationKeys.browserlessApiKey
-        ? "You have real web browser access (the Browser button) — if the user starts a browser session, you can navigate, click, type, and read pages for real, not just describe what you'd do."
+        ? "You have real, autonomous access to a web browser — you decide yourself when a task needs browsing, research, or reading a link, and start/stop it without the user pressing any button. If asked to install a skill from a link, you install it directly."
         : null,
       integrationKeys.vercelApiToken || integrationKeys.netlifyApiToken
         ? "You can Publish anything built in Codespace to a real live URL (Vercel/Netlify) — mention the Publish button once code is ready."
@@ -677,6 +856,25 @@ export default function HomePage() {
     } finally {
       setSending(false);
     }
+  }
+
+  async function handleApprovePlan() {
+    if (!pendingPlan) return;
+    setPlanBusy(true);
+    const { task, attachments, autoDecision, chatId: targetChatId } = pendingPlan;
+    setPendingPlan(null);
+    await executeTask(task, attachments, targetChatId, autoDecision);
+    setPlanBusy(false);
+  }
+
+  async function handleCancelPlan() {
+    if (!pendingPlan || !user) return;
+    const { chatId: targetChatId } = pendingPlan;
+    const cancelMsg: ChatMessage = { role: "assistant", content: "Okay, I won't go ahead with that." };
+    const finalMessages = [...messages, cancelMsg];
+    setMessages(finalMessages);
+    await persist(finalMessages, targetChatId, activeAgent?.id, activeConnection?.provider.id);
+    setPendingPlan(null);
   }
 
   const codeFiles = extractCodeFiles(messages);
@@ -850,6 +1048,15 @@ export default function HomePage() {
               />
             ))}
 
+            {pendingPlan && (
+              <PlanApprovalCard
+                steps={pendingPlan.steps}
+                onApprove={handleApprovePlan}
+                onCancel={handleCancelPlan}
+                busy={planBusy}
+              />
+            )}
+
             {toolNeed && (
               <ToolConnectPrompt
                 need={toolNeed}
@@ -861,21 +1068,10 @@ export default function HomePage() {
               />
             )}
 
-            {classifying && (
-              <p className="animate-fade-in text-xs text-ink/40">
-                The boss agent is choosing the right specialist for this task...
-              </p>
-            )}
-            {usingMcpTool && (
-              <p className="animate-fade-in text-xs text-ink/40">
-                Using {usingMcpTool}...
-              </p>
-            )}
-            {usingPluginAction && (
-              <p className="animate-fade-in text-xs text-ink/40">
-                {usingPluginAction}...
-              </p>
-            )}
+            {classifying && <AgentStatusLine icon="🧭" text="Choosing the right specialist..." />}
+            {usingMcpTool && <AgentStatusLine icon="🔧" text={`Using ${usingMcpTool}...`} />}
+            {usingPluginAction && <AgentStatusLine icon="⚡" text={`${usingPluginAction}...`} />}
+            {agentStatus && <AgentStatusLine icon="●" text={agentStatus} />}
             {sending && <TypingIndicator />}
 
             {error && (
@@ -1056,6 +1252,7 @@ export default function HomePage() {
         open={browserViewOpen}
         onClose={() => setBrowserViewOpen(false)}
         liveUrl={browserLiveUrl}
+        active={!!browserSessionId}
         starting={browserStarting}
         onStart={handleStartBrowser}
         onStop={handleStopBrowser}
