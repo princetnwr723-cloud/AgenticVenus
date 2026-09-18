@@ -14,6 +14,10 @@ import MCPPanel from "@/components/MCPPanel";
 import BusinessDNAPanel from "@/components/BusinessDNAPanel";
 import AgentTeamPanel from "@/components/AgentTeamPanel";
 import GroupsPanel from "@/components/GroupsPanel";
+import ConnectionsPanel from "@/components/ConnectionsPanel";
+import GroupChatView from "@/components/GroupChatView";
+import AgentSettingsModal from "@/components/AgentSettingsModal";
+import AnimatedAvatar from "@/components/AnimatedAvatar";
 import CodespacePanel from "@/components/CodespacePanel";
 import ModelDropdown from "@/components/ModelDropdown";
 import SettingsPanel from "@/components/SettingsPanel";
@@ -30,6 +34,10 @@ import { importSkillFromUrl } from "@/lib/skillImportClient";
 import { saveCustomSkill } from "@/lib/customSkills";
 import { listAgentGroups, type AgentGroup } from "@/lib/agentGroups";
 import { runAgentGroup } from "@/lib/groupOrchestrator";
+import { listAgentConnections, type AgentConnection } from "@/lib/agentLinks";
+import { askConnectedAgent } from "@/lib/agentLinkOrchestrator";
+import { listChatGroups, type ChatGroup } from "@/lib/chatGroups";
+import { getAgentIdentity, saveAgentIdentity, type AgentIdentity } from "@/lib/agentIdentity";
 import FilesPanel from "@/components/FilesPanel";
 import {
   getPrimaryConnection,
@@ -113,6 +121,8 @@ export default function HomePage() {
   const [codespaceOpenFileId, setCodespaceOpenFileId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [groupsOpen, setGroupsOpen] = useState(false);
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
 
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
   const [classifying, setClassifying] = useState(false);
@@ -122,6 +132,11 @@ export default function HomePage() {
 
   const [groups, setGroups] = useState<AgentGroup[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
+
+  const [agentConnections, setAgentConnections] = useState<AgentConnection[]>([]);
+  const [chatGroups, setChatGroups] = useState<ChatGroup[]>([]);
+  const [activeChatGroup, setActiveChatGroup] = useState<ChatGroup | null>(null);
+  const [agentIdentity, setAgentIdentity] = useState<AgentIdentity | null>(null);
 
   const [toolNeed, setToolNeed] = useState<ToolNeed | null>(null);
   const [pendingTaskAfterConnect, setPendingTaskAfterConnect] = useState<string | null>(null);
@@ -187,7 +202,10 @@ export default function HomePage() {
     if (!user) return;
     (async () => {
       try {
-        const [existing, allConns, dna, toolIds, servers, skillIds, custom, userPlanId, intKeys, agentGroups] = await Promise.all([
+        const [
+          existing, allConns, dna, toolIds, servers, skillIds, custom, userPlanId, intKeys,
+          catalogGroups, links, mergedGroups,
+        ] = await Promise.all([
           getPrimaryConnection(user.uid),
           getAllConnections(user.uid),
           getBusinessDNA(user.uid),
@@ -198,6 +216,8 @@ export default function HomePage() {
           getUserPlanId(user.uid),
           getIntegrationKeys(user.uid),
           listAgentGroups(user.uid),
+          listAgentConnections(user.uid),
+          listChatGroups(user.uid),
         ]);
         setConnections(allConns);
         if (existing) {
@@ -215,7 +235,9 @@ export default function HomePage() {
         setCustomSkills(custom);
         setPlanId(userPlanId);
         setIntegrationKeys(intKeys);
-        setGroups(agentGroups);
+        setGroups(catalogGroups);
+        setAgentConnections(links);
+        setChatGroups(mergedGroups);
         await refreshChats();
       } catch (err) {
         console.error("[home] failed to load workspace data:", err);
@@ -347,6 +369,15 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ceoMode, chatId, activeConnection?.provider.id]);
 
+  // Load this chat's own agent identity whenever the chat changes.
+  useEffect(() => {
+    if (!user || !chatId) {
+      setAgentIdentity(null);
+      return;
+    }
+    getAgentIdentity(user.uid, chatId).then(setAgentIdentity);
+  }, [user, chatId]);
+
   if (loading || !user || checkingConnection) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-cream">
@@ -380,6 +411,7 @@ export default function HomePage() {
     setToolNeed(null);
     setPendingPlan(null);
     setActiveGroupId(null);
+    setActiveChatGroup(null);
     setActiveProviderId(connected?.id ?? null);
   }
 
@@ -387,6 +419,7 @@ export default function HomePage() {
     if (!user) return;
     const chat = await getChat(user.uid, id);
     if (!chat) return;
+    setActiveChatGroup(null);
     setChatId(chat.id);
     setMessages(chat.messages);
     setActiveAgent(chat.agentId ? getAgentById(chat.agentId) : null);
@@ -398,6 +431,14 @@ export default function HomePage() {
     setPendingPlan(null);
     setGreeting(null);
     setError(null);
+  }
+
+  async function handleSelectChatGroup(groupId: string) {
+    const group = chatGroups.find((g) => g.id === groupId);
+    if (!group) return;
+    setChatId(null);
+    setMessages([]);
+    setActiveChatGroup(group);
   }
 
   function handleEditMessage(content: string) {
@@ -413,6 +454,13 @@ export default function HomePage() {
   async function handleSelectGroup(groupId: string | null) {
     setActiveGroupId(groupId);
     if (user && chatId) await saveGroupId(user.uid, chatId, groupId);
+  }
+
+  async function handleSaveAgentIdentity(identity: AgentIdentity) {
+    if (!user || !chatId) return;
+    await saveAgentIdentity(user.uid, chatId, identity);
+    setAgentIdentity(identity);
+    setAgentSettingsOpen(false);
   }
 
   async function handleStartComputer() {
@@ -632,6 +680,7 @@ export default function HomePage() {
     if (!currentChatId) {
       currentChatId = await createChat(user.uid, task);
       setChatId(currentChatId);
+      getAgentIdentity(user.uid, currentChatId).then(setAgentIdentity);
     }
 
     const intent = await detectScheduleIntent(provider.id, activeKey, task, model);
@@ -659,12 +708,19 @@ export default function HomePage() {
       return;
     }
 
+    // Connected agents this chat can consult, named by their chat title.
+    const myConnectedAgents = agentConnections
+      .filter((c) => c.sourceChatId === currentChatId)
+      .flatMap((c) => c.targetChatIds)
+      .map((tid) => ({ chatId: tid, name: chats.find((c) => c.id === tid)?.title || tid }));
+
     const autoDecision = await decideAutoTools(
       provider.id,
       activeKey,
       task,
       !!integrationKeys.browserlessApiKey,
       !!integrationKeys.daytonaApiKey,
+      myConnectedAgents,
       model
     );
 
@@ -738,6 +794,18 @@ export default function HomePage() {
       }
     }
 
+    if (autoDecision.askAgentChatId) {
+      setAgentStatus("🔗 Asking a connected agent...");
+      try {
+        const reply = await askConnectedAgent(user.uid, provider.id, activeKey, autoDecision.askAgentChatId, task, model);
+        toolResultNote += `\n\nYou asked a connected agent and got this reply:\n${reply}\n\nIncorporate this into your answer naturally.`;
+      } catch (err) {
+        toolResultNote += `\n\nYou tried to ask a connected agent but it failed: ${err instanceof Error ? err.message : "unknown error"}.`;
+      } finally {
+        setAgentStatus(null);
+      }
+    }
+
     if (autoDecision.needsBrowser) {
       let sid = browserSessionId;
       let autoStarted = false;
@@ -795,7 +863,7 @@ export default function HomePage() {
       }
     }
 
-    const activeGroup = groups.find((g) => g.id === activeGroupId) || null;
+    const activeCatalogGroup = groups.find((g) => g.id === activeGroupId) || null;
 
     setSending(true);
     const toolNames = connectedToolNames(effectiveConnectedToolIds(connectedToolIds, mcpServers));
@@ -814,18 +882,19 @@ export default function HomePage() {
       integrationKeys.vercelApiToken || integrationKeys.netlifyApiToken
         ? "You can Publish anything built in Codespace to a real live URL (Vercel/Netlify) — mention the Publish button once code is ready."
         : null,
+      agentConnections.some((c) => c.sourceChatId === currentChatId)
+        ? "You have other agents connected that you can consult when the user explicitly wants their input."
+        : null,
     ]
       .filter(Boolean)
       .join("\n");
 
     const installedSkillsContext = buildInstalledSkillsContext(installedSkillIds, customSkills);
 
-    if (activeGroup) {
-      // Group mode: run the team, show each specialist's turn, then a
-      // synthesized final answer as the message the user actually reads.
+    if (activeCatalogGroup) {
       setActiveAgent(null);
       try {
-        const { turns, finalAnswer } = await runAgentGroup(provider.id, activeKey, activeGroup, task, nextMessages, model);
+        const { turns, finalAnswer } = await runAgentGroup(provider.id, activeKey, activeCatalogGroup, task, nextMessages, model);
         const turnMessages: ChatMessage[] = turns.map((t) => ({
           role: "assistant",
           content: t.content,
@@ -835,7 +904,7 @@ export default function HomePage() {
         const synthesisMessage: ChatMessage = {
           role: "assistant",
           content: finalAnswer,
-          agentName: `${activeGroup.name} (combined)`,
+          agentName: `${activeCatalogGroup.name} (combined)`,
           agentColor: "#BF5F3F",
         };
         const finalMessages = [...nextMessages, ...turnMessages, synthesisMessage];
@@ -855,9 +924,11 @@ export default function HomePage() {
     setActiveAgent(agent);
     setClassifying(false);
 
+    const identity = agentIdentity || (chatId ? null : null);
     const lessons = await getAgentLessons(user.uid, agent.id);
     const systemPrompt = [
       agent.systemPrompt,
+      identity?.customPrompt ? `Additional instructions specific to you (${identity.name}): ${identity.customPrompt}` : null,
       buildBusinessContext(businessDNA),
       toolsContext,
       infraToolsContext,
@@ -918,8 +989,11 @@ export default function HomePage() {
           userLabel={user.email ?? user.displayName ?? "Account"}
           connected={connected}
           chats={chats}
+          groups={chatGroups}
           activeChatId={chatId}
+          activeGroupId={activeChatGroup?.id ?? null}
           onSelectChat={handleSelectChat}
+          onSelectGroup={handleSelectChatGroup}
           onNewChat={handleNewChat}
           onSwitchModel={() => {
             setForceSelect(false);
@@ -934,262 +1008,291 @@ export default function HomePage() {
           onOpenBusinessDNA={() => setBusinessOpen(true)}
           onOpenSkills={() => setSkillsOpen(true)}
           onOpenPricing={() => setPricingOpen(true)}
+          onOpenConnections={() => setConnectionsOpen(true)}
           onLogout={() => signOut(auth)}
         />
       )}
 
-      <section className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center justify-between border-b border-black/5 px-6 py-3">
-          <span className="text-sm font-medium text-ink/70">
-            {activeConnection ? `Chatting with ${activeConnection.provider.name}` : "Workspace"}
-          </span>
-          <div className="flex items-center gap-2">
-            {activeConnection && (
-              <ModelDropdown
-                provider={activeConnection.provider}
-                apiKey={activeConnection.apiKey}
-                selectedModel={activeConnection.model ?? null}
-                onChange={handleModelChange}
-              />
-            )}
-            <AgentTeamPanel
-              activeAgent={activeAgent}
-              classifying={classifying}
-              groups={groups}
-              activeGroupId={activeGroupId}
-              onSelectGroup={handleSelectGroup}
-              onManageGroups={() => setGroupsOpen(true)}
+      {activeChatGroup ? (
+        <section className="flex min-w-0 flex-1 flex-col">
+          <div className="flex items-center justify-between border-b border-black/5 px-6 py-3">
+            <span className="text-sm font-medium text-ink/70">👥 {activeChatGroup.name}</span>
+          </div>
+          {activeConnection && (
+            <GroupChatView
+              uid={user.uid}
+              group={activeChatGroup}
+              providerId={activeConnection.provider.id}
+              apiKey={activeConnection.apiKey}
+              model={activeConnection.model}
             />
+          )}
+        </section>
+      ) : (
+        <section className="flex min-w-0 flex-1 flex-col">
+          <div className="flex items-center justify-between border-b border-black/5 px-6 py-3">
             <button
-              onClick={() => setCodespaceOpen(true)}
-              className="focus-ring flex items-center gap-2 rounded-md border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink/80 transition-all hover:-translate-y-0.5 hover:shadow-sm"
+              onClick={() => chatId && setAgentSettingsOpen(true)}
+              disabled={!chatId}
+              className="focus-ring flex items-center gap-2 rounded-md px-1 py-1 text-sm font-medium text-ink/70 transition-colors hover:bg-sand disabled:opacity-60"
             >
-              <span className="h-1.5 w-1.5 rounded-full bg-[#4D6BFE]" />
-              Codespace
-            </button>
-            <button
-              onClick={() => setComputerViewOpen(true)}
-              aria-label="Cloud computer live view"
-              title="Cloud computer live view"
-              className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                <rect x="1.5" y="2.5" width="11" height="7" rx="1" stroke="currentColor" strokeWidth="1.2" />
-                <path d="M5 12h4M7 9.5V12" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-              </svg>
-            </button>
-            <button
-              onClick={() => setBrowserViewOpen(true)}
-              aria-label="Browser live view"
-              title="Browser live view"
-              className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.2" />
-                <path d="M1.5 7h11M7 1.5c1.8 1.6 1.8 9 0 11M7 1.5c-1.8 1.6-1.8 9 0 11" stroke="currentColor" strokeWidth="1.1" />
-              </svg>
-            </button>
-            <button
-              onClick={() => setFilesOpen(true)}
-              aria-label="Files"
-              className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                <path d="M2 3.5A1.5 1.5 0 013.5 2h2.6l1.2 1.4H10.5A1.5 1.5 0 0112 4.9v6.6A1.5 1.5 0 0110.5 13h-7A1.5 1.5 0 012 11.5v-8z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <button
-              onClick={() => setChatFullscreen((f) => !f)}
-              aria-label={chatFullscreen ? "Exit fullscreen" : "Fullscreen chat"}
-              className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
-            >
-              {chatFullscreen ? (
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                  <path d="M5.5 2H2v3.5M8.5 12H12V8.5M12 2H8.5M2 8.5V12h3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              ) : (
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                  <path d="M2 5.5V2h3.5M12 5.5V2H8.5M2 8.5V12h3.5M12 8.5V12H8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+              {agentIdentity && (
+                <>
+                  <AnimatedAvatar seed={agentIdentity.avatarSeed} size={22} />
+                  {agentIdentity.name}
+                </>
               )}
+              {!agentIdentity && (activeConnection ? `Chatting with ${activeConnection.provider.name}` : "Workspace")}
             </button>
-            <button
-              onClick={() => setSettingsOpen(true)}
-              aria-label="Settings"
-              className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                <circle cx="7" cy="7" r="1.8" stroke="currentColor" strokeWidth="1.2" />
-                <path
-                  d="M7 1.5v1.3M7 11.2v1.3M2.5 7H1.2M12.8 7h-1.3M3.6 3.6l.9.9M9.5 9.5l.9.9M10.4 3.6l-.9.9M4.5 9.5l-.9.9"
-                  stroke="currentColor"
-                  strokeWidth="1.1"
-                  strokeLinecap="round"
+            <div className="flex items-center gap-2">
+              {activeConnection && (
+                <ModelDropdown
+                  provider={activeConnection.provider}
+                  apiKey={activeConnection.apiKey}
+                  selectedModel={activeConnection.model ?? null}
+                  onChange={handleModelChange}
                 />
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        <div ref={scrollRef} className="flex-1 overflow-y-auto bg-cream-dark/40 px-6 py-8">
-          <div className="mx-auto flex max-w-3xl flex-col gap-6">
-            {mcpBanner && (
-              <div
-                className={`animate-fade-in-up rounded-md border px-4 py-2.5 text-sm ${
-                  mcpBanner.type === "success"
-                    ? "border-moss/30 bg-moss/10 text-moss"
-                    : "border-red-200 bg-red-50 text-red-700"
-                }`}
+              )}
+              <AgentTeamPanel
+                activeAgent={activeAgent}
+                classifying={classifying}
+                groups={groups}
+                activeGroupId={activeGroupId}
+                onSelectGroup={handleSelectGroup}
+                onManageGroups={() => setGroupsOpen(true)}
+              />
+              <button
+                onClick={() => setCodespaceOpen(true)}
+                className="focus-ring flex items-center gap-2 rounded-md border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink/80 transition-all hover:-translate-y-0.5 hover:shadow-sm"
               >
-                {mcpBanner.text}
-              </div>
-            )}
-            {usageLimitError && (
-              <div className="animate-fade-in-up flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
-                <span>{usageLimitError}</span>
-                <button
-                  onClick={() => setPricingOpen(true)}
-                  className="shrink-0 rounded-md bg-clay px-3 py-1 text-xs font-medium text-cream hover:bg-clay-dark"
-                >
-                  Upgrade
-                </button>
-              </div>
-            )}
-            {messages.length === 0 && (
-              <div className="animate-fade-in-up mt-16 text-center">
-                <h1 className="font-serif text-3xl text-ink">
-                  Welcome{user.displayName ? `, ${user.displayName}` : ""}
-                </h1>
-                {generatingGreeting ? (
-                  <p className="mt-2 text-sm text-ink/40">Saying hello properly...</p>
-                ) : greeting ? (
-                  <p className="mx-auto mt-2 max-w-md text-ink/70">{greeting}</p>
+                <span className="h-1.5 w-1.5 rounded-full bg-[#4D6BFE]" />
+                Codespace
+              </button>
+              <button
+                onClick={() => setComputerViewOpen(true)}
+                aria-label="Cloud computer live view"
+                title="Cloud computer live view"
+                className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <rect x="1.5" y="2.5" width="11" height="7" rx="1" stroke="currentColor" strokeWidth="1.2" />
+                  <path d="M5 12h4M7 9.5V12" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                </svg>
+              </button>
+              <button
+                onClick={() => setBrowserViewOpen(true)}
+                aria-label="Browser live view"
+                title="Browser live view"
+                className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.2" />
+                  <path d="M1.5 7h11M7 1.5c1.8 1.6 1.8 9 0 11M7 1.5c-1.8 1.6-1.8 9 0 11" stroke="currentColor" strokeWidth="1.1" />
+                </svg>
+              </button>
+              <button
+                onClick={() => setFilesOpen(true)}
+                aria-label="Files"
+                className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M2 3.5A1.5 1.5 0 013.5 2h2.6l1.2 1.4H10.5A1.5 1.5 0 0112 4.9v6.6A1.5 1.5 0 0110.5 13h-7A1.5 1.5 0 012 11.5v-8z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+                </svg>
+              </button>
+              <button
+                onClick={() => setChatFullscreen((f) => !f)}
+                aria-label={chatFullscreen ? "Exit fullscreen" : "Fullscreen chat"}
+                className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+              >
+                {chatFullscreen ? (
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                    <path d="M5.5 2H2v3.5M8.5 12H12V8.5M12 2H8.5M2 8.5V12h3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
                 ) : (
-                  <p className="mt-2 text-ink/55">
-                    {activeConnection
-                      ? `Ask ${activeConnection.provider.name} anything to get started.`
-                      : "Connect a provider to start chatting."}
-                  </p>
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                    <path d="M2 5.5V2h3.5M12 5.5V2H8.5M2 8.5V12h3.5M12 8.5V12H8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
                 )}
-              </div>
-            )}
-
-            {messages.map((m, i) => (
-              <ChatMessageItem
-                key={i}
-                message={m}
-                onEdit={i === messages.length - 1 && m.role === "user" ? handleEditMessage : undefined}
-                onOpenFile={(fileId) => {
-                  setCodespaceOpenFileId(fileId);
-                  setCodespaceOpen(true);
-                }}
-              />
-            ))}
-
-            {pendingPlan && (
-              <PlanApprovalCard
-                steps={pendingPlan.steps}
-                onApprove={handleApprovePlan}
-                onCancel={handleCancelPlan}
-                busy={planBusy}
-              />
-            )}
-
-            {toolNeed && (
-              <ToolConnectPrompt
-                need={toolNeed}
-                onOpenPlugins={() => {
-                  setHighlightToolId(toolNeed.toolId);
-                  setPluginsOpen(true);
-                }}
-                onOpenMCP={() => setMcpOpen(true)}
-              />
-            )}
-
-            {classifying && <AgentStatusLine icon="🧭" text="Choosing the right specialist..." />}
-            {usingMcpTool && <AgentStatusLine icon="🔧" text={`Using ${usingMcpTool}...`} />}
-            {usingPluginAction && <AgentStatusLine icon="⚡" text={`${usingPluginAction}...`} />}
-            {agentStatus && <AgentStatusLine icon="●" text={agentStatus} />}
-            {sending && <TypingIndicator />}
-
-            {error && (
-              <div className="animate-fade-in-up rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                {error}
-              </div>
-            )}
+              </button>
+              <button
+                onClick={() => setSettingsOpen(true)}
+                aria-label="Settings"
+                className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <circle cx="7" cy="7" r="1.8" stroke="currentColor" strokeWidth="1.2" />
+                  <path
+                    d="M7 1.5v1.3M7 11.2v1.3M2.5 7H1.2M12.8 7h-1.3M3.6 3.6l.9.9M9.5 9.5l.9.9M10.4 3.6l-.9.9M4.5 9.5l-.9.9"
+                    stroke="currentColor"
+                    strokeWidth="1.1"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            </div>
           </div>
-        </div>
 
-        <div className="border-t border-black/5 bg-cream px-6 py-4">
-          {pendingAttachments.length > 0 && (
-            <div className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
-              {pendingAttachments.map((a, i) => (
-                <div key={i} className="flex items-center gap-2 rounded-md border border-ink/10 bg-white px-2 py-1.5">
-                  <img src={a.dataUrl} alt={a.name} className="h-8 w-8 rounded object-cover" />
-                  <span className="max-w-[120px] truncate text-xs text-ink/60">{a.name}</span>
-                  <button onClick={() => removeAttachment(i)} className="text-ink/40 hover:text-red-600">
-                    ✕
+          <div ref={scrollRef} className="flex-1 overflow-y-auto bg-cream-dark/40 px-6 py-8">
+            <div className="mx-auto flex max-w-3xl flex-col gap-6">
+              {mcpBanner && (
+                <div
+                  className={`animate-fade-in-up rounded-md border px-4 py-2.5 text-sm ${
+                    mcpBanner.type === "success"
+                      ? "border-moss/30 bg-moss/10 text-moss"
+                      : "border-red-200 bg-red-50 text-red-700"
+                  }`}
+                >
+                  {mcpBanner.text}
+                </div>
+              )}
+              {usageLimitError && (
+                <div className="animate-fade-in-up flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+                  <span>{usageLimitError}</span>
+                  <button
+                    onClick={() => setPricingOpen(true)}
+                    className="shrink-0 rounded-md bg-clay px-3 py-1 text-xs font-medium text-cream hover:bg-clay-dark"
+                  >
+                    Upgrade
                   </button>
                 </div>
+              )}
+              {messages.length === 0 && (
+                <div className="animate-fade-in-up mt-16 text-center">
+                  <h1 className="font-serif text-3xl text-ink">
+                    Welcome{user.displayName ? `, ${user.displayName}` : ""}
+                  </h1>
+                  {generatingGreeting ? (
+                    <p className="mt-2 text-sm text-ink/40">Saying hello properly...</p>
+                  ) : greeting ? (
+                    <p className="mx-auto mt-2 max-w-md text-ink/70">{greeting}</p>
+                  ) : (
+                    <p className="mt-2 text-ink/55">
+                      {activeConnection
+                        ? `Ask ${activeConnection.provider.name} anything to get started.`
+                        : "Connect a provider to start chatting."}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {messages.map((m, i) => (
+                <ChatMessageItem
+                  key={i}
+                  message={m}
+                  agentIdentity={agentIdentity}
+                  onEdit={i === messages.length - 1 && m.role === "user" ? handleEditMessage : undefined}
+                  onOpenFile={(fileId) => {
+                    setCodespaceOpenFileId(fileId);
+                    setCodespaceOpen(true);
+                  }}
+                />
               ))}
+
+              {pendingPlan && (
+                <PlanApprovalCard
+                  steps={pendingPlan.steps}
+                  onApprove={handleApprovePlan}
+                  onCancel={handleCancelPlan}
+                  busy={planBusy}
+                />
+              )}
+
+              {toolNeed && (
+                <ToolConnectPrompt
+                  need={toolNeed}
+                  onOpenPlugins={() => {
+                    setHighlightToolId(toolNeed.toolId);
+                    setPluginsOpen(true);
+                  }}
+                  onOpenMCP={() => setMcpOpen(true)}
+                />
+              )}
+
+              {classifying && <AgentStatusLine icon="🧭" text="Choosing the right specialist..." />}
+              {usingMcpTool && <AgentStatusLine icon="🔧" text={`Using ${usingMcpTool}...`} />}
+              {usingPluginAction && <AgentStatusLine icon="⚡" text={`${usingPluginAction}...`} />}
+              {agentStatus && <AgentStatusLine icon="●" text={agentStatus} />}
+              {sending && <TypingIndicator agentIdentity={agentIdentity} />}
+
+              {error && (
+                <div className="animate-fade-in-up rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {error}
+                </div>
+              )}
             </div>
-          )}
-          <form
-            onSubmit={handleSend}
-            className="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border border-ink/10 bg-white px-3 py-2 shadow-sm transition-shadow focus-within:shadow-md"
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept="image/*,.txt,.md,.csv,.json,.glb,.gltf,.obj,.mtl,.fbx,.stl"
-              className="hidden"
-              onChange={(e) => handleFilesSelected(e.target.files)}
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              aria-label="Attach file or image"
-              className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink/50 transition-colors hover:bg-sand hover:text-ink"
+          </div>
+
+          <div className="border-t border-black/5 bg-cream px-6 py-4">
+            {pendingAttachments.length > 0 && (
+              <div className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
+                {pendingAttachments.map((a, i) => (
+                  <div key={i} className="flex items-center gap-2 rounded-md border border-ink/10 bg-white px-2 py-1.5">
+                    <img src={a.dataUrl} alt={a.name} className="h-8 w-8 rounded object-cover" />
+                    <span className="max-w-[120px] truncate text-xs text-ink/60">{a.name}</span>
+                    <button onClick={() => removeAttachment(i)} className="text-ink/40 hover:text-red-600">
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <form
+              onSubmit={handleSend}
+              className="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border border-ink/10 bg-white px-3 py-2 shadow-sm transition-shadow focus-within:shadow-md"
             >
-              <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-                <path d="M9 2v14M2 9h14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-              </svg>
-            </button>
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend(e as unknown as FormEvent);
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,.txt,.md,.csv,.json,.glb,.gltf,.obj,.mtl,.fbx,.stl"
+                className="hidden"
+                onChange={(e) => handleFilesSelected(e.target.files)}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Attach file or image"
+                className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-ink/50 transition-colors hover:bg-sand hover:text-ink"
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <path d="M9 2v14M2 9h14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                </svg>
+              </button>
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend(e as unknown as FormEvent);
+                  }
+                }}
+                rows={1}
+                placeholder={
+                  activeConnection
+                    ? `Message ${activeConnection.provider.name}...`
+                    : "Connect a provider to start chatting..."
                 }
-              }}
-              rows={1}
-              placeholder={
-                activeConnection
-                  ? `Message ${activeConnection.provider.name}...`
-                  : "Connect a provider to start chatting..."
-              }
-              className="max-h-40 flex-1 resize-none bg-transparent px-2 py-2 text-[15px] text-ink outline-none placeholder:text-ink/40"
-            />
-            <button
-              type="submit"
-              disabled={(!input.trim() && pendingAttachments.length === 0) || sending}
-              aria-label="Send message"
-              className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-cream transition-all hover:scale-105 disabled:cursor-not-allowed disabled:opacity-30"
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                <path d="M2 7h10M7 2l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-          </form>
-          <p className="mx-auto mt-2 max-w-3xl text-center text-xs text-ink/35">
-            AgenticVenus uses your own API key — responses come directly
-            from {activeConnection ? activeConnection.provider.name : "your chosen provider"}.
-          </p>
-        </div>
-      </section>
+                className="max-h-40 flex-1 resize-none bg-transparent px-2 py-2 text-[15px] text-ink outline-none placeholder:text-ink/40"
+              />
+              <button
+                type="submit"
+                disabled={(!input.trim() && pendingAttachments.length === 0) || sending}
+                aria-label="Send message"
+                className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-cream transition-all hover:scale-105 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M2 7h10M7 2l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </form>
+            <p className="mx-auto mt-2 max-w-3xl text-center text-xs text-ink/35">
+              AgenticVenus uses your own API key — responses come directly
+              from {activeConnection ? activeConnection.provider.name : "your chosen provider"}.
+            </p>
+          </div>
+        </section>
+      )}
 
       <ModelSelectorModal
         uid={user.uid}
@@ -1242,12 +1345,27 @@ export default function HomePage() {
           setGreeting(null);
         }}
       />
-      <GroupsPanel
+      <GroupsPanel uid={user.uid} open={groupsOpen} onClose={() => setGroupsOpen(false)} onGroupsChange={setGroups} />
+      <ConnectionsPanel
         uid={user.uid}
-        open={groupsOpen}
-        onClose={() => setGroupsOpen(false)}
-        onGroupsChange={setGroups}
+        open={connectionsOpen}
+        onClose={() => setConnectionsOpen(false)}
+        currentChatId={chatId}
+        chats={chats}
+        onGroupCreated={async () => {
+          setChatGroups(await listChatGroups(user.uid));
+          setAgentConnections(await listAgentConnections(user.uid));
+          await refreshChats();
+        }}
       />
+      {chatId && agentIdentity && (
+        <AgentSettingsModal
+          open={agentSettingsOpen}
+          identity={agentIdentity}
+          onClose={() => setAgentSettingsOpen(false)}
+          onSave={handleSaveAgentIdentity}
+        />
+      )}
       <CodespacePanel
         open={codespaceOpen}
         onClose={() => {
@@ -1258,11 +1376,7 @@ export default function HomePage() {
         assets={chatAssets}
         openFileId={codespaceOpenFileId}
       />
-      <FilesPanel
-        open={filesOpen}
-        onClose={() => setFilesOpen(false)}
-        messages={messages}
-      />
+      <FilesPanel open={filesOpen} onClose={() => setFilesOpen(false)} messages={messages} />
       <SkillsPanel
         uid={user.uid}
         open={skillsOpen}
