@@ -477,6 +477,14 @@ export default function HomePage() {
     }
   }
 
+  async function handleOpenRawComputerLink() {
+    if (!computerSandboxId) return;
+    const idToken = await auth.currentUser?.getIdToken();
+    const res = await fetch(`/api/computer/raw-link?sandboxId=${computerSandboxId}&token=${idToken}`);
+    const data = await res.json();
+    if (data.url) window.open(data.url, "_blank");
+  }
+
   async function handleStopComputer() {
     if (computerSandboxId) await stopComputerSession(computerSandboxId);
     setComputerSandboxId(null);
