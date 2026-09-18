@@ -13,6 +13,7 @@ import PluginsPanel from "@/components/PluginsPanel";
 import MCPPanel from "@/components/MCPPanel";
 import BusinessDNAPanel from "@/components/BusinessDNAPanel";
 import AgentTeamPanel from "@/components/AgentTeamPanel";
+import GroupsPanel from "@/components/GroupsPanel";
 import CodespacePanel from "@/components/CodespacePanel";
 import ModelDropdown from "@/components/ModelDropdown";
 import SettingsPanel from "@/components/SettingsPanel";
@@ -27,6 +28,8 @@ import { decideAutoTools, type AutoToolDecision } from "@/lib/autoTools";
 import { generateTaskPlan } from "@/lib/taskPlanner";
 import { importSkillFromUrl } from "@/lib/skillImportClient";
 import { saveCustomSkill } from "@/lib/customSkills";
+import { listAgentGroups, type AgentGroup } from "@/lib/agentGroups";
+import { runAgentGroup } from "@/lib/groupOrchestrator";
 import FilesPanel from "@/components/FilesPanel";
 import {
   getPrimaryConnection,
@@ -67,6 +70,7 @@ import {
   getChat,
   saveChatMessages,
   setCeoMode as saveCeoMode,
+  setGroupId as saveGroupId,
   type ChatSummary,
   type ChatRecord,
 } from "@/lib/chats";
@@ -108,12 +112,16 @@ export default function HomePage() {
   const [codespaceOpen, setCodespaceOpen] = useState(false);
   const [codespaceOpenFileId, setCodespaceOpenFileId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState(false);
 
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
   const [classifying, setClassifying] = useState(false);
   const [agentStatus, setAgentStatus] = useState<string | null>(null);
   const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
   const [planBusy, setPlanBusy] = useState(false);
+
+  const [groups, setGroups] = useState<AgentGroup[]>([]);
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
 
   const [toolNeed, setToolNeed] = useState<ToolNeed | null>(null);
   const [pendingTaskAfterConnect, setPendingTaskAfterConnect] = useState<string | null>(null);
@@ -179,7 +187,7 @@ export default function HomePage() {
     if (!user) return;
     (async () => {
       try {
-        const [existing, allConns, dna, toolIds, servers, skillIds, custom, userPlanId, intKeys] = await Promise.all([
+        const [existing, allConns, dna, toolIds, servers, skillIds, custom, userPlanId, intKeys, agentGroups] = await Promise.all([
           getPrimaryConnection(user.uid),
           getAllConnections(user.uid),
           getBusinessDNA(user.uid),
@@ -189,6 +197,7 @@ export default function HomePage() {
           listCustomSkills(user.uid),
           getUserPlanId(user.uid),
           getIntegrationKeys(user.uid),
+          listAgentGroups(user.uid),
         ]);
         setConnections(allConns);
         if (existing) {
@@ -206,6 +215,7 @@ export default function HomePage() {
         setCustomSkills(custom);
         setPlanId(userPlanId);
         setIntegrationKeys(intKeys);
+        setGroups(agentGroups);
         await refreshChats();
       } catch (err) {
         console.error("[home] failed to load workspace data:", err);
@@ -369,6 +379,7 @@ export default function HomePage() {
     setCeoMode(false);
     setToolNeed(null);
     setPendingPlan(null);
+    setActiveGroupId(null);
     setActiveProviderId(connected?.id ?? null);
   }
 
@@ -382,6 +393,7 @@ export default function HomePage() {
     setActiveProviderId(chat.providerId ?? connected?.id ?? null);
     setTelegram(chat.telegram ?? null);
     setCeoMode(!!chat.ceoMode);
+    setActiveGroupId(chat.groupId ?? null);
     setToolNeed(null);
     setPendingPlan(null);
     setGreeting(null);
@@ -398,7 +410,11 @@ export default function HomePage() {
     await refreshChats();
   }
 
-  // ---------- Manual Cloud Computer controls (panel) ----------
+  async function handleSelectGroup(groupId: string | null) {
+    setActiveGroupId(groupId);
+    if (user && chatId) await saveGroupId(user.uid, chatId, groupId);
+  }
+
   async function handleStartComputer() {
     setComputerStarting(true);
     try {
@@ -441,7 +457,6 @@ export default function HomePage() {
     }
   }
 
-  // ---------- Manual Browser controls (panel) ----------
   async function handleStartBrowser() {
     setBrowserStarting(true);
     try {
@@ -552,8 +567,6 @@ export default function HomePage() {
     await processTask(task, attachments);
   }
 
-  /** Agent installs a skill directly from a link it found in chat — no
-   * manual Skills-panel step needed. */
   async function handleAutoInstallSkill(url: string, nextMessages: ChatMessage[], targetChatId: string) {
     if (!user) return;
     setAgentStatus(`📦 Installing skill from ${url}...`);
@@ -571,7 +584,7 @@ export default function HomePage() {
       setCustomSkills((prev) => [...prev.filter((s) => s.id !== skill.id), skill]);
       const confirmMsg: ChatMessage = {
         role: "assistant",
-        content: `Installed the **${skill.name}** skill from that link — I'll apply it automatically whenever it's relevant from now on.`,
+        content: `Installed the **${skill.name}** skill from that link — I'll apply it automatically whenever it's relevant from now on. You can view its full content anytime under Settings → Skills.`,
       };
       const finalMessages = [...nextMessages, confirmMsg];
       setMessages(finalMessages);
@@ -621,7 +634,6 @@ export default function HomePage() {
       setChatId(currentChatId);
     }
 
-    // 0. Scheduling request?
     const intent = await detectScheduleIntent(provider.id, activeKey, task, model);
     if (intent) {
       const runAt = nextOccurrence(intent.time);
@@ -638,7 +650,6 @@ export default function HomePage() {
       return;
     }
 
-    // 0.5 Does this need a catalog Plugin/MCP tool that isn't connected?
     const effectiveToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
     const need = await detectToolNeed(provider.id, activeKey, nextMessages, effectiveToolIds, model);
     if (need && !need.connected) {
@@ -648,8 +659,6 @@ export default function HomePage() {
       return;
     }
 
-    // 0.6 Does this need Browser / Computer / a skill install — decided
-    // by the agent itself, no button-pressing required.
     const autoDecision = await decideAutoTools(
       provider.id,
       activeKey,
@@ -666,9 +675,6 @@ export default function HomePage() {
     }
 
     if (autoDecision.needsBrowser || autoDecision.needsComputer) {
-      // Real-world action tasks get a short plan shown for approval
-      // first — a genuinely connected Plugin/MCP action (handled later
-      // in executeTask) always runs directly, no gate needed.
       const toolsSummary = [
         autoDecision.needsBrowser ? "a real web browser (navigate, click, type, read pages)" : null,
         autoDecision.needsComputer ? "a real cloud desktop computer" : null,
@@ -681,7 +687,6 @@ export default function HomePage() {
         setPendingPlan({ task, attachments, autoDecision, steps: plan.steps, chatId: currentChatId });
         return;
       }
-      // If planning itself failed, just proceed directly rather than blocking.
     }
 
     await executeTask(task, attachments, currentChatId, autoDecision);
@@ -699,15 +704,8 @@ export default function HomePage() {
       ? messages
       : [...messages, { role: "user" as const, content: task, ...(attachments.length ? { attachments } : {}) }];
 
-    // 1. Boss agent decides which specialist should handle this task.
-    setClassifying(true);
-    const agent = await classifyAgent(provider.id, activeKey, task, model);
-    setActiveAgent(agent);
-    setClassifying(false);
-
     let toolResultNote = "";
 
-    // 1.5 MCP tool — runs directly, no approval gate.
     if (mcpServers.length > 0) {
       const toolCall = await decideMcpToolCall(provider.id, activeKey, nextMessages, mcpServers, model);
       if (toolCall) {
@@ -724,7 +722,6 @@ export default function HomePage() {
       }
     }
 
-    // 1.6 Connected plugin action — also runs directly.
     if (effectiveConnectedToolIds(connectedToolIds, mcpServers).length > 0) {
       const planned = await decidePluginAction(provider.id, activeKey, nextMessages, connectedToolIds, model);
       if (planned) {
@@ -741,8 +738,6 @@ export default function HomePage() {
       }
     }
 
-    // 1.7 Autonomous Browser use — starts and stops itself if this task
-    // was the reason it opened, so the user never has to press a button.
     if (autoDecision.needsBrowser) {
       let sid = browserSessionId;
       let autoStarted = false;
@@ -771,7 +766,6 @@ export default function HomePage() {
       }
     }
 
-    // 1.8 Autonomous Computer use — same pattern.
     if (autoDecision.needsComputer) {
       let sbx = computerSandboxId;
       let autoStarted = false;
@@ -801,7 +795,8 @@ export default function HomePage() {
       }
     }
 
-    // 2. The chosen specialist answers for real.
+    const activeGroup = groups.find((g) => g.id === activeGroupId) || null;
+
     setSending(true);
     const toolNames = connectedToolNames(effectiveConnectedToolIds(connectedToolIds, mcpServers));
     const toolsContext =
@@ -824,6 +819,42 @@ export default function HomePage() {
       .join("\n");
 
     const installedSkillsContext = buildInstalledSkillsContext(installedSkillIds, customSkills);
+
+    if (activeGroup) {
+      // Group mode: run the team, show each specialist's turn, then a
+      // synthesized final answer as the message the user actually reads.
+      setActiveAgent(null);
+      try {
+        const { turns, finalAnswer } = await runAgentGroup(provider.id, activeKey, activeGroup, task, nextMessages, model);
+        const turnMessages: ChatMessage[] = turns.map((t) => ({
+          role: "assistant",
+          content: t.content,
+          agentName: t.agentName,
+          agentColor: t.color,
+        }));
+        const synthesisMessage: ChatMessage = {
+          role: "assistant",
+          content: finalAnswer,
+          agentName: `${activeGroup.name} (combined)`,
+          agentColor: "#BF5F3F",
+        };
+        const finalMessages = [...nextMessages, ...turnMessages, synthesisMessage];
+        setMessages(finalMessages);
+        await persist(finalMessages, currentChatId, undefined, provider.id);
+        await incrementTodayUsage(user.uid);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "The group failed to complete the task.");
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
+    setClassifying(true);
+    const agent = await classifyAgent(provider.id, activeKey, task, model);
+    setActiveAgent(agent);
+    setClassifying(false);
+
     const lessons = await getAgentLessons(user.uid, agent.id);
     const systemPrompt = [
       agent.systemPrompt,
@@ -921,7 +952,14 @@ export default function HomePage() {
                 onChange={handleModelChange}
               />
             )}
-            <AgentTeamPanel activeAgent={activeAgent} classifying={classifying} />
+            <AgentTeamPanel
+              activeAgent={activeAgent}
+              classifying={classifying}
+              groups={groups}
+              activeGroupId={activeGroupId}
+              onSelectGroup={handleSelectGroup}
+              onManageGroups={() => setGroupsOpen(true)}
+            />
             <button
               onClick={() => setCodespaceOpen(true)}
               className="focus-ring flex items-center gap-2 rounded-md border border-ink/10 bg-white px-3 py-1.5 text-xs font-medium text-ink/80 transition-all hover:-translate-y-0.5 hover:shadow-sm"
@@ -1203,6 +1241,12 @@ export default function HomePage() {
           setBusinessDNA(dna);
           setGreeting(null);
         }}
+      />
+      <GroupsPanel
+        uid={user.uid}
+        open={groupsOpen}
+        onClose={() => setGroupsOpen(false)}
+        onGroupsChange={setGroups}
       />
       <CodespacePanel
         open={codespaceOpen}
