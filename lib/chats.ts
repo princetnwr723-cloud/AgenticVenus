@@ -1,9 +1,4 @@
 // lib/chats.ts
-// Persists conversations so they show up in the sidebar and survive a
-// refresh. Kept simple: each chat is one Firestore document holding its
-// full message array (fine at this scale — a dedicated messages
-// subcollection would be the next step for very long chat histories).
-
 import {
   addDoc,
   collection,
@@ -33,6 +28,7 @@ export type ChatRecord = {
   providerId?: string;
   telegram?: { botToken: string; botUsername: string } | null;
   ceoMode?: boolean;
+  groupId?: string | null;
 };
 
 export async function listChats(uid: string): Promise<ChatSummary[]> {
@@ -59,6 +55,7 @@ export async function getChat(uid: string, chatId: string): Promise<ChatRecord |
     providerId: data.providerId,
     telegram: data.telegram ?? null,
     ceoMode: !!data.ceoMode,
+    groupId: data.groupId ?? null,
   };
 }
 
@@ -67,12 +64,16 @@ export async function setCeoMode(uid: string, chatId: string, enabled: boolean) 
   await updateDoc(ref, { ceoMode: enabled });
 }
 
+export async function setGroupId(uid: string, chatId: string, groupId: string | null) {
+  const ref = doc(db, "users", uid, "chats", chatId);
+  await updateDoc(ref, { groupId });
+}
+
 function titleFromMessage(message: string): string {
   const clean = message.trim().replace(/\s+/g, " ");
   return clean.length > 42 ? clean.slice(0, 42) + "…" : clean;
 }
 
-/** Creates a new chat doc from the first user message and returns its id. */
 export async function createChat(uid: string, firstMessage: string): Promise<string> {
   const ref = collection(db, "users", uid, "chats");
   const docRef = await addDoc(ref, {
