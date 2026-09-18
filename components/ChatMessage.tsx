@@ -1,14 +1,10 @@
 "use client";
 
 // components/ChatMessage.tsx
-// A single message in the conversation. User turns get Edit + Copy below
-// them (revealed on hover); assistant turns get Copy + a token-usage
-// count below them, pulled from the provider's own response (see
-// lib/chatClient.ts's TokenUsage).
-//
-// Any fenced code block in an assistant message is pulled out and shown
-// as a Claude-style clickable file card (CodeFileCard) instead of a raw
-// code block — clicking one opens that file in Codespace via onOpenFile.
+// A single message in the conversation. Fenced code blocks in an
+// assistant message render as clickable file cards. When a message is
+// one specialist's turn from a Group run (agentName/agentColor set), a
+// small colored label shows which agent said it.
 
 import { useState } from "react";
 import type { ChatMessage as ChatMessageType } from "@/lib/chatClient";
@@ -28,10 +24,6 @@ type MessagePart =
 
 const FENCE_RE = /```(\w+)?\n([\s\S]*?)```/g;
 
-/** Splits an assistant message into plain-text chunks and fenced code
- * blocks, so code blocks can be rendered as real React components
- * (CodeFileCard) instead of being baked into the renderMarkdown HTML
- * string. */
 function splitTextAndCode(content: string): MessagePart[] {
   const parts: MessagePart[] = [];
   let lastIndex = 0;
@@ -114,10 +106,18 @@ export function ChatMessageItem({ message, onEdit, onOpenFile }: Props) {
 
   return (
     <div className="animate-fade-in-up group flex gap-3">
-      <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-clay text-[11px] font-semibold text-cream">
-        V
+      <span
+        className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[11px] font-semibold text-cream"
+        style={{ backgroundColor: message.agentColor || "#D97757" }}
+      >
+        {message.agentName ? message.agentName.charAt(0) : "V"}
       </span>
       <div className="min-w-0 flex-1">
+        {message.agentName && (
+          <p className="mb-1 text-xs font-medium" style={{ color: message.agentColor || "#D97757" }}>
+            {message.agentName}
+          </p>
+        )}
         <div className="max-w-[85%] rounded-2xl bg-cream-dark/70 px-4 py-3">
           {parts.map((part, i) =>
             part.type === "file" ? (
