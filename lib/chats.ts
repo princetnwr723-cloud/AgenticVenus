@@ -1,4 +1,3 @@
-// lib/chats.ts
 import {
   addDoc,
   collection,
@@ -18,6 +17,7 @@ export type ChatSummary = {
   id: string;
   title: string;
   updatedAt?: Timestamp;
+  mergedGroupId?: string | null;
 };
 
 export type ChatRecord = {
@@ -28,7 +28,8 @@ export type ChatRecord = {
   providerId?: string;
   telegram?: { botToken: string; botUsername: string } | null;
   ceoMode?: boolean;
-  groupId?: string | null;
+  groupId?: string | null; // active catalog Agent Group (specialist team) for this chat
+  mergedGroupId?: string | null; // real chat-merge Group this chat now lives inside
 };
 
 export async function listChats(uid: string): Promise<ChatSummary[]> {
@@ -39,6 +40,7 @@ export async function listChats(uid: string): Promise<ChatSummary[]> {
     id: d.id,
     title: d.data().title || "Untitled chat",
     updatedAt: d.data().updatedAt,
+    mergedGroupId: d.data().mergedGroupId ?? null,
   }));
 }
 
@@ -56,17 +58,16 @@ export async function getChat(uid: string, chatId: string): Promise<ChatRecord |
     telegram: data.telegram ?? null,
     ceoMode: !!data.ceoMode,
     groupId: data.groupId ?? null,
+    mergedGroupId: data.mergedGroupId ?? null,
   };
 }
 
 export async function setCeoMode(uid: string, chatId: string, enabled: boolean) {
-  const ref = doc(db, "users", uid, "chats", chatId);
-  await updateDoc(ref, { ceoMode: enabled });
+  await updateDoc(doc(db, "users", uid, "chats", chatId), { ceoMode: enabled });
 }
 
 export async function setGroupId(uid: string, chatId: string, groupId: string | null) {
-  const ref = doc(db, "users", uid, "chats", chatId);
-  await updateDoc(ref, { groupId });
+  await updateDoc(doc(db, "users", uid, "chats", chatId), { groupId });
 }
 
 function titleFromMessage(message: string): string {
