@@ -23,6 +23,8 @@ export type ChatMessage = {
   content: string;
   usage?: TokenUsage;
   attachments?: Attachment[];
+  agentName?: string; // set when this message is one specialist's turn in a Group run
+  agentColor?: string;
 };
 
 export type TokenUsage = {
