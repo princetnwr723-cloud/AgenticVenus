@@ -1,21 +1,24 @@
 "use client";
 
 // components/ChatMessage.tsx
-// A single message in the conversation. Fenced code blocks in an
-// assistant message render as clickable file cards. When a message is
-// one specialist's turn from a Group run (agentName/agentColor set), a
-// small colored label shows which agent said it.
+// A single message. Fenced code blocks render as clickable file cards.
+// Assistant messages show the chat's own agent identity (name + animated
+// avatar); a Group turn (agentName/agentColor set on the message itself)
+// overrides that with its own name/avatar seed for that one message.
 
 import { useState } from "react";
 import type { ChatMessage as ChatMessageType } from "@/lib/chatClient";
 import { renderMarkdown } from "@/lib/markdown";
 import CodeFileCard from "@/components/CodeFileCard";
+import AnimatedAvatar from "@/components/AnimatedAvatar";
 import type { CodeFile } from "@/lib/codeExtract";
+import type { AgentIdentity } from "@/lib/agentIdentity";
 
 type Props = {
   message: ChatMessageType;
   onEdit?: (content: string) => void;
   onOpenFile?: (fileId: string) => void;
+  agentIdentity?: AgentIdentity | null;
 };
 
 type MessagePart =
@@ -35,28 +38,21 @@ function splitTextAndCode(content: string): MessagePart[] {
     if (match.index > lastIndex) {
       parts.push({ type: "text", content: content.slice(lastIndex, match.index) });
     }
-
     const language = match[1] || "text";
     const body = match[2].trim();
     const firstLine = body.split("\n")[0];
     const filenameMatch = firstLine.match(/filename:\s*(\S+)/i);
     const filename = filenameMatch ? filenameMatch[1] : `snippet-${++autoIndex}.${language}`;
     const code = filenameMatch ? body.split("\n").slice(1).join("\n") : body;
-
     parts.push({ type: "file", file: { id: filename, filename, language, code } });
     lastIndex = match.index + match[0].length;
   }
-
-  if (lastIndex < content.length) {
-    parts.push({ type: "text", content: content.slice(lastIndex) });
-  }
-  if (parts.length === 0) {
-    parts.push({ type: "text", content });
-  }
+  if (lastIndex < content.length) parts.push({ type: "text", content: content.slice(lastIndex) });
+  if (parts.length === 0) parts.push({ type: "text", content });
   return parts;
 }
 
-export function ChatMessageItem({ message, onEdit, onOpenFile }: Props) {
+export function ChatMessageItem({ message, onEdit, onOpenFile, agentIdentity }: Props) {
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
@@ -103,21 +99,14 @@ export function ChatMessageItem({ message, onEdit, onOpenFile }: Props) {
   }
 
   const parts = splitTextAndCode(message.content);
+  const avatarSeed = message.agentName ? message.agentName : agentIdentity?.avatarSeed || "a1";
+  const displayName = message.agentName || agentIdentity?.name;
 
   return (
     <div className="animate-fade-in-up group flex gap-3">
-      <span
-        className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[11px] font-semibold text-cream"
-        style={{ backgroundColor: message.agentColor || "#D97757" }}
-      >
-        {message.agentName ? message.agentName.charAt(0) : "V"}
-      </span>
+      <AnimatedAvatar seed={avatarSeed} size={24} />
       <div className="min-w-0 flex-1">
-        {message.agentName && (
-          <p className="mb-1 text-xs font-medium" style={{ color: message.agentColor || "#D97757" }}>
-            {message.agentName}
-          </p>
-        )}
+        {displayName && <p className="mb-1 text-xs font-medium text-ink/50">{displayName}</p>}
         <div className="max-w-[85%] rounded-2xl bg-cream-dark/70 px-4 py-3">
           {parts.map((part, i) =>
             part.type === "file" ? (
@@ -135,21 +124,17 @@ export function ChatMessageItem({ message, onEdit, onOpenFile }: Props) {
           <button onClick={handleCopy} className="text-xs text-ink/40 hover:text-ink">
             {copied ? "Copied" : "Copy"}
           </button>
-          {message.usage && (
-            <span className="text-xs text-ink/30">{message.usage.totalTokens} tokens</span>
-          )}
+          {message.usage && <span className="text-xs text-ink/30">{message.usage.totalTokens} tokens</span>}
         </div>
       </div>
     </div>
   );
 }
 
-export function TypingIndicator() {
+export function TypingIndicator({ agentIdentity }: { agentIdentity?: AgentIdentity | null }) {
   return (
     <div className="animate-fade-in flex items-center gap-3">
-      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-clay text-[11px] font-semibold text-cream">
-        V
-      </span>
+      <AnimatedAvatar seed={agentIdentity?.avatarSeed || "a1"} size={24} />
       <span className="flex items-center gap-1.5 rounded-2xl bg-sand px-4 py-3">
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-ink/40" />
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-ink/40" />
