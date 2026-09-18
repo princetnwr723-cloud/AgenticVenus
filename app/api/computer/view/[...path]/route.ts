@@ -1,4 +1,3 @@
-// app/api/computer/view/[...path]/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
 import { getSignedPreviewUrl } from "@/lib/computerUse";
@@ -6,18 +5,10 @@ import { getSignedPreviewUrl } from "@/lib/computerUse";
 const VNC_PORT = 6080;
 const TEXT_LIKE = /\.(html?|css|js|mjs|json|svg|xml|txt)$/i;
 const SKIP_HEADERS = { "X-Daytona-Skip-Preview-Warning": "true" };
-
-async function discoverEntryPath(base: string): Promise<string> {
-  try {
-    const res = await fetch(`${base}/`, { headers: SKIP_HEADERS });
-    const html = await res.text();
-    const match = html.match(/href=["']([^"']*vnc[^"']*\.html[^"']*)["']/i);
-    if (match) return match[1];
-  } catch {
-    // fall through
-  }
-  return "vnc.html?autoconnect=true&resize=remote&reconnect=true";
-}
+// Always force autoconnect ourselves — letting the proxy "discover" the
+// real entry link was the bug: the discovered href had no query params,
+// silently overriding autoconnect and leaving a manual Connect button.
+const DEFAULT_ENTRY = "vnc.html?autoconnect=true&resize=remote&reconnect=true&path=api/computer/view";
 
 export async function GET(req: NextRequest, { params }: { params: { path: string[] } }) {
   const segments = params.path || [];
@@ -33,7 +24,7 @@ export async function GET(req: NextRequest, { params }: { params: { path: string
 
     const signed = await getSignedPreviewUrl(sandboxId, apiKey, VNC_PORT);
     const base = signed.url.replace(/\/$/, "");
-    const realPath = rest.length ? rest.join("/") : await discoverEntryPath(base);
+    const realPath = rest.length ? rest.join("/") : DEFAULT_ENTRY;
 
     const upstream = await fetch(`${base}/${realPath.replace(/^\//, "")}`, { headers: SKIP_HEADERS });
     const prefix = `/api/computer/view/${sandboxId}/${token}`;
@@ -48,10 +39,6 @@ export async function GET(req: NextRequest, { params }: { params: { path: string
 
       if (/\.html?$/i.test(pathOnly)) {
         const u = new URL(base);
-        // The WS URL noVNC computes is built off THIS page's own path
-        // (our proxy prefix + realPath), not Daytona's real path — so we
-        // strip our prefix back off before rewriting host/protocol,
-        // leaving just the genuine remainder (e.g. "websockify").
         const wsShim = `<script>(function(){
 var H="${u.host}",P="${u.protocol === "https:" ? "wss:" : "ws:"}",PFX=${JSON.stringify(prefix)};
 var O=window.WebSocket;
