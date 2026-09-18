@@ -1,8 +1,7 @@
 // lib/skillImport.ts
 // Parses a SKILL.md file's content (YAML-ish frontmatter + markdown
-// body) into an importable skill — same shape Anthropic's own Agent
-// Skills use: `name` / `description` in frontmatter, instructions as
-// the body.
+// body) into an importable skill. No hard size rejection — large files
+// are trimmed to a safe storage size instead of being refused outright.
 
 export type ParsedSkill = {
   id: string;
@@ -10,6 +9,8 @@ export type ParsedSkill = {
   description: string;
   instructions: string;
 };
+
+const MAX_INSTRUCTIONS_CHARS = 20_000; // well under Firestore's 1MiB/doc cap
 
 export function parseSkillMd(raw: string): ParsedSkill {
   const fmMatch = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
@@ -46,5 +47,11 @@ export function parseSkillMd(raw: string): ParsedSkill {
       .replace(/^-|-$/g, "")
       .slice(0, 40) || "custom-skill";
 
-  return { id, name, description, instructions: body.trim().slice(0, 4000) };
+  const trimmed = body.trim();
+  const instructions =
+    trimmed.length > MAX_INSTRUCTIONS_CHARS
+      ? trimmed.slice(0, MAX_INSTRUCTIONS_CHARS) + "\n\n[...trimmed for storage — this skill's file was longer than the stored portion.]"
+      : trimmed;
+
+  return { id, name, description, instructions };
 }
