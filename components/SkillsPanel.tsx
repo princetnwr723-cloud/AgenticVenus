@@ -1,10 +1,9 @@
 "use client";
 
 // components/SkillsPanel.tsx
-// Browse and install skills — either from the built-in catalog, or
-// imported straight from a SKILL.md link (GitHub blob links are
-// rewritten to raw content automatically). Installing beyond your
-// plan's limit prompts an upgrade instead.
+// Browse and install skills — catalog ones, or imported from a SKILL.md
+// link. Custom skills can be expanded to see the full stored content,
+// so you can verify exactly what the agent will follow.
 
 import { useEffect, useState } from "react";
 import SlideOverPanel from "@/components/SlideOverPanel";
@@ -30,6 +29,7 @@ export default function SkillsPanel({ uid, open, onClose, onInstalledChange, onC
   const [maxSkills, setMaxSkills] = useState(1);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const [importUrl, setImportUrl] = useState("");
   const [importing, setImporting] = useState(false);
@@ -87,7 +87,7 @@ export default function SkillsPanel({ uid, open, onClose, onInstalledChange, onC
       const skill: Skill = {
         id: parsed.id,
         name: parsed.name,
-        category: "writing", // custom skills don't need a real category — shown separately anyway
+        category: "writing",
         description: parsed.description,
         color: "#8A8578",
         instructions: parsed.instructions,
@@ -97,6 +97,7 @@ export default function SkillsPanel({ uid, open, onClose, onInstalledChange, onC
       setCustomSkills(next);
       onCustomSkillsChange?.(next);
       setImportUrl("");
+      setExpandedId(skill.id);
     } catch (err) {
       setImportError(err instanceof Error ? err.message : "Failed to import that skill.");
     } finally {
@@ -110,6 +111,7 @@ export default function SkillsPanel({ uid, open, onClose, onInstalledChange, onC
     const next = customSkills.filter((s) => s.id !== skillId);
     setCustomSkills(next);
     onCustomSkillsChange?.(next);
+    if (expandedId === skillId) setExpandedId(null);
     setBusyId(null);
   }
 
@@ -144,24 +146,40 @@ export default function SkillsPanel({ uid, open, onClose, onInstalledChange, onC
 
         {customSkills.length > 0 && (
           <div className="mt-3 space-y-2">
-            {customSkills.map((skill) => (
-              <div key={skill.id} className="flex items-center gap-3 rounded-md border border-ink/10 bg-white px-3 py-2.5">
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-sand text-xs font-semibold text-ink/70">
-                  {skill.name.charAt(0)}
-                </span>
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-ink">{skill.name}</p>
-                  <p className="text-xs text-ink/50">{skill.description}</p>
+            {customSkills.map((skill) => {
+              const isExpanded = expandedId === skill.id;
+              return (
+                <div key={skill.id} className="rounded-md border border-ink/10 bg-white">
+                  <div className="flex items-center gap-3 px-3 py-2.5">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-sand text-xs font-semibold text-ink/70">
+                      {skill.name.charAt(0)}
+                    </span>
+                    <div className="flex-1">
+                      <p className="text-sm font-medium text-ink">{skill.name}</p>
+                      <p className="text-xs text-ink/50">{skill.description}</p>
+                    </div>
+                    <button
+                      onClick={() => setExpandedId(isExpanded ? null : skill.id)}
+                      className="shrink-0 rounded-md border border-ink/10 px-3 py-1.5 text-xs font-medium text-ink/60 transition-colors hover:bg-sand hover:text-ink"
+                    >
+                      {isExpanded ? "Hide" : "View"}
+                    </button>
+                    <button
+                      onClick={() => handleRemoveCustom(skill.id)}
+                      disabled={busyId === skill.id}
+                      className="shrink-0 rounded-md border border-ink/10 px-3 py-1.5 text-xs font-medium text-ink/60 transition-colors hover:bg-sand hover:text-red-600 disabled:opacity-50"
+                    >
+                      {busyId === skill.id ? "..." : "Remove"}
+                    </button>
+                  </div>
+                  {isExpanded && (
+                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words border-t border-ink/10 bg-sand/40 px-3 py-2.5 text-xs text-ink/75">
+                      {skill.instructions}
+                    </pre>
+                  )}
                 </div>
-                <button
-                  onClick={() => handleRemoveCustom(skill.id)}
-                  disabled={busyId === skill.id}
-                  className="shrink-0 rounded-md border border-ink/10 px-3 py-1.5 text-xs font-medium text-ink/60 transition-colors hover:bg-sand hover:text-red-600 disabled:opacity-50"
-                >
-                  {busyId === skill.id ? "..." : "Remove"}
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
