@@ -185,6 +185,9 @@ export default function HomePage() {
   const [browserStepLog, setBrowserStepLog] = useState<string[]>([]);
   const [browserRunning, setBrowserRunning] = useState(false);
   const browserAutoStarted = useRef(false);
+  const [missionsOpen, setMissionsOpen] = useState(false);
+  const [activeMission, setActiveMission] = useState<Mission | null>(null);
+  const missionCancelledRef = useRef(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -669,6 +672,37 @@ export default function HomePage() {
       setModalOpen(true);
       return;
     }
+   
+  async function launchMission(mission: Mission, targetChatId: string) {
+    if (!activeConnection) return;
+    missionCancelledRef.current = false;
+    setActiveMission(mission);
+    const { provider, apiKey: activeKey, model } = activeConnection;
+    const final = await runMission(
+      user!.uid, provider.id, activeKey, mission,
+      !!integrationKeys.browserlessApiKey, !!integrationKeys.daytonaApiKey, model,
+      (m) => setActiveMission(m),
+      (s) => setAgentStatus(s),
+      () => missionCancelledRef.current
+    );
+    setAgentStatus(null);
+    if (final.summary) {
+      const summaryMsg: ChatMessage = { role: "assistant", content: final.summary };
+      const finalMessages = [...messages, summaryMsg];
+      setMessages(finalMessages);
+      await persist(finalMessages, targetChatId, activeAgent?.id, provider.id);
+    }
+  }
+
+  function handleCancelMission() {
+    missionCancelledRef.current = true;
+  }
+
+  async function handleResumeMission(mission: Mission) {
+    setMissionsOpen(false);
+    if (mission.chatId !== chatId) await handleSelectChat(mission.chatId);
+    await launchMission(mission, mission.chatId);
+  }
 
     const usageCheck = await canSendMessage(user.uid);
     if (!usageCheck.allowed) {
