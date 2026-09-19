@@ -1,19 +1,7 @@
 "use client";
 
-// components/ModelSelectorModal.tsx
-// The core AgenticVenus flow: user picks one of 10 AI providers, pastes
-// their own API key, and the connection is saved to Firestore under
-// users/{uid}/connections/{providerId}.
-//
-// NOTE ON SECURITY: this demo saves the key as-is to Firestore so the app
-// works end-to-end. For production, don't store raw provider API keys in
-// Firestore client-side — proxy calls through a server route (e.g. a
-// Next.js Route Handler or Cloud Function) and store keys encrypted, or in
-// a secret manager. See README.md "Security notes".
-
 import { useState } from "react";
-import { doc, setDoc, serverTimestamp } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { saveConnection } from "@/lib/connections";
 import { PROVIDERS, type Provider } from "@/lib/providers";
 
 type Props = {
@@ -21,8 +9,6 @@ type Props = {
   open: boolean;
   onClose: () => void;
   onConnected: (provider: Provider, apiKey: string) => void;
-  /** When true, hides the close button and disables backdrop-click-to-close.
-   * Used for the required first-time setup flow. */
   forceSelect?: boolean;
 };
 
@@ -56,16 +42,11 @@ export default function ModelSelectorModal({
     setSaving(true);
     setError(null);
     try {
-      await setDoc(doc(db, "users", uid, "connections", selected.id), {
-        providerId: selected.id,
-        providerName: selected.name,
-        apiKey: apiKey.trim(),
-        connectedAt: serverTimestamp(),
-      });
+      await saveConnection(selected.id, selected.name, apiKey.trim());
       onConnected(selected, apiKey.trim());
       handleClose();
     } catch (err) {
-      setError("Couldn't save the connection. Please try again.");
+      setError(err instanceof Error ? err.message : "Couldn't save the connection. Please try again.");
     } finally {
       setSaving(false);
     }
@@ -86,16 +67,10 @@ export default function ModelSelectorModal({
           <>
             <div className="flex items-center justify-between">
               <h2 className="font-serif text-xl text-ink">
-                {forceSelect
-                  ? "Set up your AI to get started"
-                  : "Choose your AI provider"}
+                {forceSelect ? "Set up your AI to get started" : "Choose your AI provider"}
               </h2>
               {!forceSelect && (
-                <button
-                  onClick={handleClose}
-                  aria-label="Close"
-                  className="focus-ring rounded-md p-1 text-ink/50 hover:text-ink"
-                >
+                <button onClick={handleClose} aria-label="Close" className="focus-ring rounded-md p-1 text-ink/50 hover:text-ink">
                   ✕
                 </button>
               )}
@@ -113,17 +88,10 @@ export default function ModelSelectorModal({
                   onClick={() => setSelected(provider)}
                   className="focus-ring flex items-center gap-3 rounded-md border border-ink/10 bg-white px-4 py-3 text-left transition-all hover:-translate-y-0.5 hover:border-clay/40 hover:bg-sand hover:shadow-sm"
                 >
-                  <span
-                    className="h-2.5 w-2.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: provider.accent }}
-                  />
+                  <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: provider.accent }} />
                   <span className="flex-1">
-                    <span className="block text-sm font-medium text-ink">
-                      {provider.name}
-                    </span>
-                    <span className="block text-xs text-ink/55">
-                      {provider.description}
-                    </span>
+                    <span className="block text-sm font-medium text-ink">{provider.name}</span>
+                    <span className="block text-xs text-ink/55">{provider.description}</span>
                   </span>
                 </button>
               ))}
@@ -132,36 +100,23 @@ export default function ModelSelectorModal({
         ) : (
           <>
             <div className="flex items-center justify-between">
-              <button
-                onClick={() => setSelected(null)}
-                className="focus-ring rounded-md px-1 text-sm text-ink/60 hover:text-ink"
-              >
+              <button onClick={() => setSelected(null)} className="focus-ring rounded-md px-1 text-sm text-ink/60 hover:text-ink">
                 ← Back
               </button>
               {!forceSelect && (
-                <button
-                  onClick={handleClose}
-                  aria-label="Close"
-                  className="focus-ring rounded-md p-1 text-ink/50 hover:text-ink"
-                >
+                <button onClick={handleClose} aria-label="Close" className="focus-ring rounded-md p-1 text-ink/50 hover:text-ink">
                   ✕
                 </button>
               )}
             </div>
 
             <div className="mt-3 flex items-center gap-3">
-              <span
-                className="h-3 w-3 shrink-0 rounded-full"
-                style={{ backgroundColor: selected.accent }}
-              />
+              <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: selected.accent }} />
               <h2 className="font-serif text-xl text-ink">{selected.name}</h2>
             </div>
             <p className="mt-2 text-sm text-ink/60">{selected.keyHint}</p>
 
-            <label
-              htmlFor="apiKey"
-              className="mb-1 mt-5 block text-sm text-ink/70"
-            >
+            <label htmlFor="apiKey" className="mb-1 mt-5 block text-sm text-ink/70">
               API key
             </label>
             <input
@@ -172,12 +127,7 @@ export default function ModelSelectorModal({
               placeholder={selected.keyPlaceholder}
               className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
             />
-            <a
-              href={selected.keyDocsUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="mt-2 inline-block text-xs text-clay hover:underline"
-            >
+            <a href={selected.keyDocsUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-clay hover:underline">
               Where do I find this?
             </a>
 
