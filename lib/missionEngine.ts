@@ -1,73 +1,80 @@
 // lib/missionEngine.ts
-// Runs a Mission's subtasks one at a time, checkpointing to Firestore
-// after EVERY subtask (not just at the end) — that's what makes closing
-// the tab mid-mission safe. Each subtask reuses the same autonomous
-// browser/computer primitives as a normal message, then gets a
-// lightweight self-check ("did this genuinely succeed?") before moving
-// on. Failures retry with backoff up to a hard limit, then the mission
-// continues past that one subtask rather than stalling forever.
+// Executes a Mission as waves: every subtask whose dependencies are all
+// "done" is ready; all currently-ready subtasks run CONCURRENTLY (capped
+// at MAX_CONCURRENCY so a mission can't hammer the browser/computer/rate
+// limits), then the next wave is computed. This is what makes
+// independent work (e.g. researching 5 companies) genuinely parallel
+// instead of one-at-a-time — while dependent work (a report that needs
+// those 5 results) correctly waits.
 
 import { sendChatMessage } from "@/lib/chatClient";
 import { decideAutoTools } from "@/lib/autoTools";
 import { startBrowserSession, stopBrowserSession, runBrowserTask } from "@/lib/browserClient";
 import { startComputerSession, stopComputerSession, runComputerTask } from "@/lib/computerClient";
 import { updateMission, type Mission, type MissionSubtask } from "@/lib/missions";
+import { verifyTaskResult } from "@/lib/verification";
+import { withRecovery } from "@/lib/recoveryEngine";
 
-const MAX_ATTEMPTS = 3;
-const BACKOFF_MS = [1000, 3000, 7000];
-
-function extractJson(text: string): string {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  return (fenced ? fenced[1] : text).trim();
-}
-
-async function verifySubtask(
-  providerId: string, apiKey: string, description: string, result: string, model?: string
-): Promise<{ success: boolean; reason: string }> {
-  const prompt = `Subtask: "${description}"\nWhat happened: "${result.slice(0, 1500)}"\n\nWas this subtask genuinely accomplished? Reply with ONLY raw JSON: {"success": boolean, "reason": "one short sentence"}`;
-  try {
-    const { text } = await sendChatMessage({ providerId, apiKey, model, messages: [{ role: "user", content: prompt }] });
-    const parsed = JSON.parse(extractJson(text));
-    return { success: !!parsed.success, reason: parsed.reason || "" };
-  } catch {
-    return { success: true, reason: "Could not verify — assuming success." };
-  }
-}
+const MAX_CONCURRENCY = 3; // caps parallel browser/computer/API usage per mission
 
 async function runOneSubtask(
   providerId: string, apiKey: string, objective: string, subtask: MissionSubtask,
   priorResults: string[], hasBrowser: boolean, hasComputer: boolean, model: string | undefined,
   onStep: (s: string) => void
 ): Promise<string> {
-  const context = priorResults.length ? `Progress so far:\n${priorResults.map((r, i) => `${i + 1}. ${r}`).join("\n")}\n\n` : "";
-  const autoDecision = await decideAutoTools(providerId, apiKey, subtask.description, hasBrowser, hasComputer, [], model);
+  const context = priorResults.length ? `Relevant results from finished subtasks:\n${priorResults.map((r, i) => `${i + 1}. ${r}`).join("\n")}\n\n` : "";
+  const autoDecision = subtask.workerType === "browser" || subtask.workerType === "computer"
+    ? { needsBrowser: subtask.workerType === "browser" && hasBrowser, needsComputer: subtask.workerType === "computer" && hasComputer, installSkillUrl: null, askAgentChatId: null }
+    : await decideAutoTools(providerId, apiKey, subtask.description, hasBrowser, hasComputer, [], model);
 
   let toolNote = "";
   if (autoDecision.needsBrowser) {
-    onStep("🌐 Starting the browser for this step...");
+    onStep(`🌐 [${subtask.id}] Starting the browser...`);
     const { sessionId } = await startBrowserSession();
     try {
-      const summary = await runBrowserTask(providerId, apiKey, sessionId, subtask.description, model, onStep);
+      const summary = await runBrowserTask(providerId, apiKey, sessionId, subtask.description, model, (s) => onStep(`[${subtask.id}] ${s}`));
       toolNote = `Used the browser: ${summary}`;
     } finally {
       await stopBrowserSession(sessionId);
     }
   } else if (autoDecision.needsComputer) {
-    onStep("🖥️ Starting the computer for this step...");
+    onStep(`🖥️ [${subtask.id}] Starting the computer...`);
     const { sandboxId } = await startComputerSession();
     try {
-      const summary = await runComputerTask(providerId, apiKey, sandboxId, subtask.description, model, onStep);
+      const summary = await runComputerTask(providerId, apiKey, sandboxId, subtask.description, model, (s) => onStep(`[${subtask.id}] ${s}`));
       toolNote = `Used the computer: ${summary}`;
     } finally {
       await stopComputerSession(sandboxId);
     }
   }
 
-  const prompt = `You're working on this larger objective: "${objective}"\n\n${context}Current subtask: "${subtask.description}"${
+  const prompt = `You're the "${subtask.workerType}" specialist on a team working toward this objective: "${objective}"\n\n${context}Your subtask: "${subtask.description}"${
     toolNote ? `\n\n${toolNote}` : ""
-  }\n\nGive a concise result for this subtask — what you found or did.`;
+  }\n\nGive a concise result for your subtask.`;
   const { text } = await sendChatMessage({ providerId, apiKey, model, messages: [{ role: "user", content: prompt }] });
   return text;
+}
+
+async function runAndVerify(
+  uid: string, missionId: string, providerId: string, apiKey: string, objective: string,
+  subtask: MissionSubtask, priorResults: string[], hasBrowser: boolean, hasComputer: boolean,
+  model: string | undefined, onStep: (s: string) => void
+): Promise<MissionSubtask> {
+  const recovery = await withRecovery(`mission:${missionId}:${subtask.id}`, async () => {
+    const outcome = await runOneSubtask(providerId, apiKey, objective, subtask, priorResults, hasBrowser, hasComputer, model, onStep);
+    const verdict = await verifyTaskResult(providerId, apiKey, subtask.description, outcome, model);
+    if (!verdict.verified) throw new Error(verdict.reason || "Verification failed.");
+    return outcome;
+  });
+
+  return recovery.ok
+    ? { ...subtask, status: "done", result: recovery.value, attempts: recovery.attempts }
+    : { ...subtask, status: "failed", error: `${recovery.error.category}: ${recovery.rawMessage}`, attempts: recovery.attempts };
+}
+
+function findReadySubtasks(subtasks: MissionSubtask[]): MissionSubtask[] {
+  const doneIds = new Set(subtasks.filter((s) => s.status === "done" || s.status === "skipped").map((s) => s.id));
+  return subtasks.filter((s) => s.status === "pending" && s.dependsOn.every((dep) => doneIds.has(dep)));
 }
 
 export async function runMission(
@@ -77,9 +84,10 @@ export async function runMission(
   isCancelled: () => boolean
 ): Promise<Mission> {
   let current: Mission = { ...mission, subtasks: [...mission.subtasks] };
-  const priorResults = current.subtasks.filter((s) => s.status === "done" && s.result).map((s) => s.result!);
 
-  for (let i = current.currentIndex; i < current.subtasks.length; i++) {
+  const stillPending = () => current.subtasks.some((s) => s.status === "pending");
+
+  while (stillPending()) {
     if (isCancelled()) {
       current = { ...current, status: "cancelled" };
       onUpdate(current);
@@ -87,38 +95,45 @@ export async function runMission(
       return current;
     }
 
-    const subtask = current.subtasks[i];
-    if (subtask.status === "done" || subtask.status === "skipped") continue;
+    let ready = findReadySubtasks(current.subtasks);
 
-    current.subtasks[i] = { ...subtask, status: "running" };
-    current = { ...current, currentIndex: i };
-    onUpdate(current);
-    await updateMission(uid, mission.id, { subtasks: current.subtasks, currentIndex: i, status: "running" });
-
-    let attempt = 0;
-    let succeeded = false;
-    let lastError = "";
-    let lastResult = "";
-
-    while (attempt < MAX_ATTEMPTS && !succeeded) {
-      try {
-        onStep(`Step ${i + 1}/${current.subtasks.length}: ${subtask.description}`);
-        lastResult = await runOneSubtask(providerId, apiKey, current.objective, subtask, priorResults, hasBrowser, hasComputer, model, onStep);
-        const verdict = await verifySubtask(providerId, apiKey, subtask.description, lastResult, model);
-        if (verdict.success) succeeded = true;
-        else { lastError = verdict.reason; attempt++; if (attempt < MAX_ATTEMPTS) await new Promise((r) => setTimeout(r, BACKOFF_MS[attempt - 1] || 5000)); }
-      } catch (err) {
-        lastError = err instanceof Error ? err.message : "unknown error";
-        attempt++;
-        if (attempt < MAX_ATTEMPTS) await new Promise((r) => setTimeout(r, BACKOFF_MS[attempt - 1] || 5000));
+    // A subtask blocked on a FAILED dependency can never become ready —
+    // mark it skipped so the mission doesn't stall forever on it.
+    if (ready.length === 0) {
+      const failedIds = new Set(current.subtasks.filter((s) => s.status === "failed").map((s) => s.id));
+      const blocked = current.subtasks.filter((s) => s.status === "pending" && s.dependsOn.some((d) => failedIds.has(d)));
+      if (blocked.length > 0) {
+        current.subtasks = current.subtasks.map((s) =>
+          blocked.some((b) => b.id === s.id) ? { ...s, status: "skipped", error: "Skipped — a required dependency failed." } : s
+        );
+        onUpdate(current);
+        await updateMission(uid, mission.id, { subtasks: current.subtasks });
+        continue;
       }
+      // Nothing ready and nothing blocked-by-failure — a genuine cycle;
+      // run whatever's left sequentially as a safe fallback.
+      ready = current.subtasks.filter((s) => s.status === "pending").slice(0, 1);
+      if (ready.length === 0) break;
     }
 
-    current.subtasks[i] = succeeded
-      ? { ...subtask, status: "done", result: lastResult, attempts: attempt + 1 }
-      : { ...subtask, status: "failed", error: lastError, attempts: attempt };
+    const wave = ready.slice(0, MAX_CONCURRENCY);
+    onStep(
+      wave.length > 1
+        ? `Running ${wave.length} subtasks in parallel: ${wave.map((s) => s.description).join(" · ")}`
+        : `Step: ${wave[0].description}`
+    );
 
-    if (succeeded) priorResults.push(lastResult);
+    current.subtasks = current.subtasks.map((s) => (wave.some((w) => w.id === s.id) ? { ...s, status: "running" } : s));
+    onUpdate(current);
+    await updateMission(uid, mission.id, { subtasks: current.subtasks, status: "running" });
+
+    const priorResults = current.subtasks.filter((s) => s.status === "done" && s.result).map((s) => s.result!);
+
+    const results = await Promise.all(
+      wave.map((s) => runAndVerify(uid, mission.id, providerId, apiKey, current.objective, s, priorResults, hasBrowser, hasComputer, model, onStep))
+    );
+
+    current.subtasks = current.subtasks.map((s) => results.find((r) => r.id === s.id) || s);
     onUpdate(current);
     await updateMission(uid, mission.id, { subtasks: current.subtasks });
   }
@@ -127,12 +142,12 @@ export async function runMission(
   const finalStatus = current.status === "cancelled" ? "cancelled" : anyFailed ? "failed" : "completed";
 
   const summaryPrompt = `Objective: "${current.objective}"\n\nResults:\n${current.subtasks
-    .map((s) => `- [${s.status}] ${s.description}${s.result ? `: ${s.result.slice(0, 300)}` : s.error ? ` (failed: ${s.error})` : ""}`)
+    .map((s) => `- [${s.status}/${s.workerType}] ${s.description}${s.result ? `: ${s.result.slice(0, 300)}` : s.error ? ` (${s.error})` : ""}`)
     .join("\n")}\n\nWrite a short final summary for the user — what was accomplished, what failed if anything, and what they might want to do next.`;
   const { text: summary } = await sendChatMessage({ providerId, apiKey, model, messages: [{ role: "user", content: summaryPrompt }] });
 
   current = { ...current, status: finalStatus, summary };
   onUpdate(current);
-  await updateMission(uid, mission.id, { status: finalStatus, summary, currentIndex: current.subtasks.length });
+  await updateMission(uid, mission.id, { status: finalStatus, summary });
   return current;
 }
