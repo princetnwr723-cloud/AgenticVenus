@@ -1,18 +1,17 @@
 "use client";
 
 // components/SettingsPanel.tsx
-// Lives next to Agent Team and Codespace in the chat top bar. Lets the
-// user pick which connected provider THIS conversation uses, connect
-// additional providers, and connect a Telegram bot to this specific
-// conversation (each conversation can use its own bot — you're never
-// locked into one Telegram account for everything).
+// Integration keys now show a "Connected" badge instead of the actual
+// value (which the client never receives anymore — see
+// lib/integrationKeys.ts). Typing a new value and blurring the field
+// encrypts and saves it server-side; a "Remove" link clears it.
 
 import { useState, useEffect } from "react";
 import SlideOverPanel from "@/components/SlideOverPanel";
 import type { SavedConnection } from "@/lib/connections";
 import { connectTelegram, disconnectTelegram } from "@/lib/telegram";
 import type { ChatRecord } from "@/lib/chats";
-import { getIntegrationKeys, saveIntegrationKeys, type IntegrationKeys } from "@/lib/integrationKeys";
+import { getIntegrationKeys, saveIntegrationKeys, deleteIntegrationKey, type IntegrationKeys } from "@/lib/integrationKeys";
 
 type Props = {
   uid: string;
@@ -29,36 +28,53 @@ type Props = {
   onCeoModeChange: (enabled: boolean) => void;
 };
 
+const INTEGRATION_FIELDS: { key: keyof IntegrationKeys; label: string; hint: string; placeholder: string }[] = [
+  { key: "daytonaApiKey", label: "Daytona API key", hint: "Gives the agent a real cloud computer with a live view.", placeholder: "dtn_..." },
+  { key: "browserlessApiKey", label: "Browserless API key", hint: "Lets the agent browse the web for real, with a live view.", placeholder: "Your Browserless token" },
+  { key: "vercelApiToken", label: "Vercel API token", hint: "Lets the agent Publish a Codespace project to a real live URL.", placeholder: "Your Vercel token" },
+  { key: "netlifyApiToken", label: "Netlify API token", hint: "Same as Vercel, for Netlify deploys.", placeholder: "Your Netlify token" },
+];
+
 export default function SettingsPanel({
-  uid,
-  open,
-  onClose,
-  connections,
-  activeProviderId,
-  onSelectProvider,
-  onConnectAnother,
-  chatId,
-  telegram,
-  onTelegramChange,
-  ceoMode,
-  onCeoModeChange,
+  uid, open, onClose, connections, activeProviderId, onSelectProvider, onConnectAnother,
+  chatId, telegram, onTelegramChange, ceoMode, onCeoModeChange,
 }: Props) {
   const [botToken, setBotToken] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [integrationKeys, setIntegrationKeys] = useState<IntegrationKeys>({});
-  const [savingKeys, setSavingKeys] = useState(false);
+  const [presence, setPresence] = useState<IntegrationKeys>({});
+  const [draftValues, setDraftValues] = useState<Record<string, string>>({});
+  const [savingField, setSavingField] = useState<string | null>(null);
 
   useEffect(() => {
-    if (open) getIntegrationKeys(uid).then(setIntegrationKeys);
+    if (open) getIntegrationKeys(uid).then(setPresence);
   }, [open, uid]);
 
-  async function handleSaveIntegrationKey(field: keyof IntegrationKeys, value: string) {
-    setSavingKeys(true);
-    const next = { ...integrationKeys, [field]: value };
-    setIntegrationKeys(next);
-    await saveIntegrationKeys(uid, { [field]: value });
-    setSavingKeys(false);
+  async function handleSaveIntegrationKey(field: keyof IntegrationKeys) {
+    const value = draftValues[field]?.trim();
+    if (!value) return;
+    setSavingField(field);
+    try {
+      await saveIntegrationKeys(uid, { [field]: value });
+      setPresence((p) => ({ ...p, [field]: true }));
+      setDraftValues((d) => ({ ...d, [field]: "" }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save.");
+    } finally {
+      setSavingField(null);
+    }
+  }
+
+  async function handleRemoveIntegrationKey(field: keyof IntegrationKeys) {
+    setSavingField(field);
+    try {
+      await deleteIntegrationKey(field);
+      setPresence((p) => ({ ...p, [field]: false }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to remove.");
+    } finally {
+      setSavingField(null);
+    }
   }
 
   async function handleConnectTelegram() {
@@ -94,12 +110,7 @@ export default function SettingsPanel({
   }
 
   return (
-    <SlideOverPanel
-      open={open}
-      onClose={onClose}
-      title="Settings"
-      subtitle="Choose which connected provider this conversation uses."
-    >
+    <SlideOverPanel open={open} onClose={onClose} title="Settings" subtitle="Choose which connected provider this conversation uses.">
       <div className="space-y-2">
         {connections.length === 0 ? (
           <p className="text-sm text-ink/40">No providers connected yet.</p>
@@ -109,24 +120,15 @@ export default function SettingsPanel({
               key={c.provider.id}
               onClick={() => onSelectProvider(c.provider.id)}
               className={`flex w-full items-center gap-3 rounded-md border px-4 py-3 text-left transition-all hover:-translate-y-0.5 hover:shadow-sm ${
-                activeProviderId === c.provider.id
-                  ? "border-clay/40 bg-clay/5"
-                  : "border-ink/10 bg-white"
+                activeProviderId === c.provider.id ? "border-clay/40 bg-clay/5" : "border-ink/10 bg-white"
               }`}
             >
-              <span
-                className="h-2.5 w-2.5 shrink-0 rounded-full"
-                style={{ backgroundColor: c.provider.accent }}
-              />
+              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: c.provider.accent }} />
               <span className="flex-1">
                 <span className="block text-sm font-medium text-ink">{c.provider.name}</span>
-                <span className="block text-xs text-ink/50">
-                  {c.model || "Default model"}
-                </span>
+                <span className="block text-xs text-ink/50">{c.model || "Default model"}</span>
               </span>
-              {activeProviderId === c.provider.id && (
-                <span className="shrink-0 text-xs font-medium text-clay">In use</span>
-              )}
+              {activeProviderId === c.provider.id && <span className="shrink-0 text-xs font-medium text-clay">In use</span>}
             </button>
           ))
         )}
@@ -140,17 +142,14 @@ export default function SettingsPanel({
       </button>
 
       <p className="mt-4 text-xs text-ink/40">
-        Switching here only changes the provider for this conversation.
-        Your sidebar default stays the same until you switch that
-        separately.
+        Switching here only changes the provider for this conversation. Your sidebar default stays the same until you switch that separately.
       </p>
 
-      {/* Telegram — per-conversation */}
+      {/* Telegram */}
       <div className="mt-8 border-t border-ink/10 pt-6">
         <h3 className="text-sm font-medium text-ink">Telegram</h3>
         <p className="mt-1 text-xs text-ink/50">
-          Connect a Telegram bot to just this conversation — talk to this
-          agent from Telegram too. Each conversation can use its own bot.
+          Connect a Telegram bot to just this conversation — talk to this agent from Telegram too, with the same tool access as the web app.
         </p>
 
         {telegram?.botUsername ? (
@@ -159,11 +158,7 @@ export default function SettingsPanel({
               <p className="text-sm font-medium text-ink">Connected</p>
               <p className="text-xs text-ink/50">@{telegram.botUsername}</p>
             </div>
-            <button
-              onClick={handleDisconnectTelegram}
-              disabled={connecting}
-              className="text-xs text-ink/40 hover:text-red-600 disabled:opacity-50"
-            >
+            <button onClick={handleDisconnectTelegram} disabled={connecting} className="text-xs text-ink/40 hover:text-red-600 disabled:opacity-50">
               Disconnect
             </button>
           </div>
@@ -189,16 +184,10 @@ export default function SettingsPanel({
 
         <p className="mt-3 text-xs text-ink/35">
           Don&apos;t have a bot yet? Message{" "}
-          <a
-            href="https://t.me/BotFather"
-            target="_blank"
-            rel="noreferrer"
-            className="text-clay hover:underline"
-          >
+          <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="text-clay hover:underline">
             @BotFather
           </a>{" "}
-          on Telegram, send <code>/newbot</code>, and paste the token it
-          gives you above.
+          on Telegram, send <code>/newbot</code>, and paste the token it gives you above.
         </p>
       </div>
 
@@ -208,100 +197,64 @@ export default function SettingsPanel({
           <div>
             <h3 className="text-sm font-medium text-ink">CEO Mode</h3>
             <p className="mt-1 max-w-xs text-xs text-ink/50">
-              Every hour, the agent surveys what's connected (email, MCP
-              tools) and takes reasonable action on its own — replying to
-              something important, flagging an issue it finds, etc.
+              Every hour, the agent surveys what's connected (email, MCP tools) and takes reasonable action on its own.
             </p>
           </div>
           <button
             onClick={() => chatId && onCeoModeChange(!ceoMode)}
             disabled={!chatId}
-            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 ${
-              ceoMode ? "bg-clay" : "bg-ink/15"
-            }`}
+            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 ${ceoMode ? "bg-clay" : "bg-ink/15"}`}
           >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                ceoMode ? "translate-x-5" : "translate-x-0.5"
-              }`}
-            />
+            <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${ceoMode ? "translate-x-5" : "translate-x-0.5"}`} />
           </button>
         </div>
-        {!chatId && (
-          <p className="mt-2 text-xs text-amber-700">Send a message first so this chat is saved.</p>
-        )}
-        <p className="mt-3 text-xs text-ink/35">
-          Only runs while this tab stays open (same as Scheduler) — true
-          background operation while the app is closed needs a server-side
-          cron job, which is a further step.
-        </p>
+        {!chatId && <p className="mt-2 text-xs text-amber-700">Send a message first so this chat is saved.</p>}
       </div>
 
-      {/* Integrations — infrastructure keys shared across every chat */}
+      {/* Integrations — now encrypted at rest */}
       <div className="mt-8 border-t border-ink/10 pt-6">
         <h3 className="text-sm font-medium text-ink">Integrations</h3>
         <p className="mt-1 text-xs text-ink/50">
-          These keys are shared across every chat's agent (a new chat
-          still starts each session fresh — logins, running VMs, etc.
-          aren't carried over).
+          These keys are encrypted before storage and decrypted only for the moment a server request needs them —
+          not even you can see the value again once saved, only whether it's set.
         </p>
 
-        <div className="mt-4 space-y-4">
-          <div>
-            <label className="mb-1 block text-sm text-ink/70">Daytona API key</label>
-            <p className="mb-1.5 text-xs text-ink/45">Gives the agent a real cloud computer (4 vCPU / 16GB RAM / 50GB) with a live view.</p>
-            <input
-              type="password"
-              value={integrationKeys.daytonaApiKey || ""}
-              onChange={(e) => setIntegrationKeys({ ...integrationKeys, daytonaApiKey: e.target.value })}
-              onBlur={(e) => handleSaveIntegrationKey("daytonaApiKey", e.target.value)}
-              placeholder="dtn_..."
-              className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm text-ink/70">Browserless API key</label>
-            <p className="mb-1.5 text-xs text-ink/45">Lets the agent browse the web for tasks Plugins/MCP can't handle, with a live view.</p>
-            <input
-              type="password"
-              value={integrationKeys.browserlessApiKey || ""}
-              onChange={(e) => setIntegrationKeys({ ...integrationKeys, browserlessApiKey: e.target.value })}
-              onBlur={(e) => handleSaveIntegrationKey("browserlessApiKey", e.target.value)}
-              placeholder="Your Browserless token"
-              className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm text-ink/70">Vercel API token</label>
-            <p className="mb-1.5 text-xs text-ink/45">Lets the agent publish a Codespace project to a real live URL.</p>
-            <input
-              type="password"
-              value={integrationKeys.vercelApiToken || ""}
-              onChange={(e) => setIntegrationKeys({ ...integrationKeys, vercelApiToken: e.target.value })}
-              onBlur={(e) => handleSaveIntegrationKey("vercelApiToken", e.target.value)}
-              placeholder="Your Vercel token"
-              className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm text-ink/70">Netlify API token</label>
-            <input
-              type="password"
-              value={integrationKeys.netlifyApiToken || ""}
-              onChange={(e) => setIntegrationKeys({ ...integrationKeys, netlifyApiToken: e.target.value })}
-              onBlur={(e) => handleSaveIntegrationKey("netlifyApiToken", e.target.value)}
-              placeholder="Your Netlify token"
-              className="focus-ring w-full rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
-            />
-          </div>
-
-          {savingKeys && <p className="text-xs text-ink/35">Saving...</p>}
+        <div className="mt-4 space-y-5">
+          {INTEGRATION_FIELDS.map(({ key, label, hint, placeholder }) => (
+            <div key={key}>
+              <div className="mb-1 flex items-center justify-between">
+                <label className="block text-sm text-ink/70">{label}</label>
+                {presence[key] && (
+                  <span className="flex items-center gap-1.5 text-xs text-moss">
+                    <span className="h-1.5 w-1.5 rounded-full bg-moss" /> Connected
+                  </span>
+                )}
+              </div>
+              <p className="mb-1.5 text-xs text-ink/45">{hint}</p>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={draftValues[key] || ""}
+                  onChange={(e) => setDraftValues((d) => ({ ...d, [key]: e.target.value }))}
+                  onBlur={() => handleSaveIntegrationKey(key)}
+                  placeholder={presence[key] ? "Enter a new value to replace it" : placeholder}
+                  className="focus-ring flex-1 rounded-md border border-ink/15 bg-white px-3 py-2.5 text-sm outline-none"
+                />
+                {presence[key] && (
+                  <button
+                    onClick={() => handleRemoveIntegrationKey(key)}
+                    disabled={savingField === key}
+                    className="shrink-0 rounded-md border border-ink/10 px-3 py-2.5 text-xs text-ink/50 hover:bg-sand hover:text-red-600 disabled:opacity-50"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              {savingField === key && <p className="mt-1 text-xs text-ink/35">Saving...</p>}
+            </div>
+          ))}
         </div>
       </div>
     </SlideOverPanel>
-
   );
 }
