@@ -21,9 +21,9 @@ import { startComputer, runComputerAction, stopComputer, type ComputerAction } f
 import type { IntegrationKeys } from "@/lib/integrationKeys";
 import type { MCPServer } from "@/lib/mcp";
 
-export async function getIntegrationKeysAdmin(uid: string): Promise<IntegrationKeys> {
-  const snap = await adminDb().collection("users").doc(uid).collection("settings").doc("integrations").get();
-  return snap.exists ? (snap.data() as IntegrationKeys) : {};
+export async function getIntegrationKeysAdmin(uid: string) {
+  const { resolveAllIntegrationSecrets } = await import("@/lib/secretsResolve");
+  return resolveAllIntegrationSecrets(uid);
 }
 
 export async function getBusinessDNAAdmin(uid: string): Promise<BusinessDNA | null> {
