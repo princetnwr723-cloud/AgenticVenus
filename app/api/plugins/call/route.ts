@@ -1,12 +1,8 @@
-// app/api/plugins/call/route.ts
-// Actually executes a plugin action (send an email, etc.). Resolves the
-// user's stored OAuth token, refreshes it first if it's about to expire,
-// and never sends the token itself back to the browser.
-
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
 import { getOAuthProvider } from "@/lib/oauthProviders";
 import { executePluginAction } from "@/lib/pluginActions";
+import { encryptSecret, decryptSecret } from "@/lib/secretsVault";
 
 export async function POST(req: NextRequest) {
   try {
@@ -26,17 +22,19 @@ export async function POST(req: NextRequest) {
     if (!snap.exists) return NextResponse.json({ error: `${toolId} isn't connected.` }, { status: 400 });
 
     const conn = snap.data()!;
-    let accessToken = conn.accessToken;
+    if (!conn.accessToken_enc) return NextResponse.json({ error: `${toolId} isn't connected with OAuth.` }, { status: 400 });
+    let accessToken = decryptSecret(conn.accessToken_enc);
 
-    if (conn.expiresAt && Date.now() > conn.expiresAt - 60_000 && conn.refreshToken) {
+    if (conn.expiresAt && Date.now() > conn.expiresAt - 60_000 && conn.refreshToken_enc) {
       const config = getOAuthProvider(toolId);
       if (config) {
+        const refreshToken = decryptSecret(conn.refreshToken_enc);
         const refreshRes = await fetch(config.tokenUrl, {
           method: "POST",
           headers: { "content-type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
             grant_type: "refresh_token",
-            refresh_token: conn.refreshToken,
+            refresh_token: refreshToken,
             client_id: process.env[config.clientIdEnv]!,
             client_secret: process.env[config.clientSecretEnv]!,
           }),
@@ -45,7 +43,7 @@ export async function POST(req: NextRequest) {
         if (refreshRes.ok && refreshData.access_token) {
           accessToken = refreshData.access_token;
           await ref.update({
-            accessToken,
+            accessToken_enc: encryptSecret(accessToken),
             expiresAt: Date.now() + (refreshData.expires_in ? refreshData.expires_in * 1000 : 55 * 60 * 1000),
           });
         }
@@ -56,7 +54,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, result });
   } catch (err) {
     console.error("[api/plugins/call]", err);
-    const message = err instanceof Error ? err.message : "Plugin action failed.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Plugin action failed." }, { status: 500 });
   }
 }
