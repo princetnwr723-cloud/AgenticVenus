@@ -1,12 +1,7 @@
-// app/api/plugins/oauth/callback/route.ts
-// Where Gmail/Slack/etc. redirect back to after the user logs in and
-// approves access. Exchanges the code for real tokens using
-// AgenticVenus's registered client secret (never exposed to the
-// browser), and saves the plugin as genuinely connected.
-
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebaseAdmin";
 import { getOAuthProvider } from "@/lib/oauthProviders";
+import { encryptSecret } from "@/lib/secretsVault";
 
 export async function GET(req: NextRequest) {
   const code = req.nextUrl.searchParams.get("code");
@@ -46,20 +41,14 @@ export async function GET(req: NextRequest) {
       throw new Error(tokenData.error_description || tokenData.error || "Token exchange failed.");
     }
 
-    await db
-      .collection("users")
-      .doc(session.uid)
-      .collection("pluginConnections")
-      .doc(session.toolId)
-      .set({
-        accessToken: tokenData.access_token,
-        refreshToken: tokenData.refresh_token || null,
-        expiresAt: Date.now() + (tokenData.expires_in ? tokenData.expires_in * 1000 : 55 * 60 * 1000),
-        connectedAt: new Date().toISOString(),
-      });
+    await db.collection("users").doc(session.uid).collection("pluginConnections").doc(session.toolId).set({
+      accessToken_enc: encryptSecret(tokenData.access_token),
+      refreshToken_enc: tokenData.refresh_token ? encryptSecret(tokenData.refresh_token) : null,
+      expiresAt: Date.now() + (tokenData.expires_in ? tokenData.expires_in * 1000 : 55 * 60 * 1000),
+      connectedAt: new Date().toISOString(),
+    });
 
     await sessionRef.delete();
-
     return NextResponse.redirect(`${origin}/home?pluginConnected=${encodeURIComponent(config.displayName)}`);
   } catch (err) {
     console.error("[api/plugins/oauth/callback]", err);
