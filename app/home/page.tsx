@@ -188,29 +188,36 @@ export default function HomePage() {
   const [missionsOpen, setMissionsOpen] = useState(false);
   const [activeMission, setActiveMission] = useState<Mission | null>(null);
   const missionCancelledRef = useRef(false);
-  // 0.6 "Continue" — resume the latest unfinished mission for this chat.
-  const continueDecision = await decideContinueIntent(provider.id, activeKey, task, model);
-  if (continueDecision.wantsContinue) {
-    const resumable = await findResumableMission(user.uid, currentChatId);
-    await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
-    if (resumable) {
-      await launchMission(resumable, currentChatId);
-    } else {
-      const noMissionMsg: ChatMessage = { role: "assistant", content: "I don't see an unfinished mission for this chat to continue." };
-      const finalMessages = [...nextMessages, noMissionMsg];
+
+  async function launchMission(mission: Mission, targetChatId: string) {
+    if (!activeConnection) return;
+    missionCancelledRef.current = false;
+    setActiveMission(mission);
+    const { provider, apiKey: activeKey, model } = activeConnection;
+    const final = await runMission(
+      user!.uid, provider.id, activeKey, mission,
+      !!integrationKeys.browserlessApiKey, !!integrationKeys.daytonaApiKey, model,
+      (m) => setActiveMission(m),
+      (s) => setAgentStatus(s),
+      () => missionCancelledRef.current
+    );
+    setAgentStatus(null);
+    if (final.summary) {
+      const summaryMsg: ChatMessage = { role: "assistant", content: final.summary };
+      const finalMessages = [...messages, summaryMsg];
       setMessages(finalMessages);
-      await persist(finalMessages, currentChatId, activeAgent?.id, provider.id);
+      await persist(finalMessages, targetChatId, activeAgent?.id, provider.id);
     }
-    return;
   }
 
-// 0.7 Genuinely multi-step objective → tracked Mission instead of one-shot.
-  const missionDecision = await decideMissionIntent(provider.id, activeKey, task, model);
-  if (missionDecision.isMission) {
-    const mission = await createMission(user.uid, currentChatId, task, missionDecision.subtasks);
-    await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
-    await launchMission(mission, currentChatId);
-    return;
+  function handleCancelMission() {
+    missionCancelledRef.current = true;
+  }
+
+  async function handleResumeMission(mission: Mission) {
+    setMissionsOpen(false);
+    if (mission.chatId !== chatId) await handleSelectChat(mission.chatId);
+    await launchMission(mission, mission.chatId);
   }
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -696,37 +703,6 @@ export default function HomePage() {
       setModalOpen(true);
       return;
     }
-   
-  async function launchMission(mission: Mission, targetChatId: string) {
-    if (!activeConnection) return;
-    missionCancelledRef.current = false;
-    setActiveMission(mission);
-    const { provider, apiKey: activeKey, model } = activeConnection;
-    const final = await runMission(
-      user!.uid, provider.id, activeKey, mission,
-      !!integrationKeys.browserlessApiKey, !!integrationKeys.daytonaApiKey, model,
-      (m) => setActiveMission(m),
-      (s) => setAgentStatus(s),
-      () => missionCancelledRef.current
-    );
-    setAgentStatus(null);
-    if (final.summary) {
-      const summaryMsg: ChatMessage = { role: "assistant", content: final.summary };
-      const finalMessages = [...messages, summaryMsg];
-      setMessages(finalMessages);
-      await persist(finalMessages, targetChatId, activeAgent?.id, provider.id);
-    }
-  }
-
-  function handleCancelMission() {
-    missionCancelledRef.current = true;
-  }
-
-  async function handleResumeMission(mission: Mission) {
-    setMissionsOpen(false);
-    if (mission.chatId !== chatId) await handleSelectChat(mission.chatId);
-    await launchMission(mission, mission.chatId);
-  }
 
     const usageCheck = await canSendMessage(user.uid);
     if (!usageCheck.allowed) {
@@ -767,6 +743,31 @@ export default function HomePage() {
       const finalMessages = [...nextMessages, confirmation];
       setMessages(finalMessages);
       await persist(finalMessages, currentChatId, activeAgent?.id, provider.id);
+      return;
+    }
+
+    // 0.6 "Continue" — resume the latest unfinished mission for this chat.
+    const continueDecision = await decideContinueIntent(provider.id, activeKey, task, model);
+    if (continueDecision.wantsContinue) {
+      const resumable = await findResumableMission(user.uid, currentChatId);
+      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+      if (resumable) {
+        await launchMission(resumable, currentChatId);
+      } else {
+        const noMissionMsg: ChatMessage = { role: "assistant", content: "I don't see an unfinished mission for this chat to continue." };
+        const finalMessages = [...nextMessages, noMissionMsg];
+        setMessages(finalMessages);
+        await persist(finalMessages, currentChatId, activeAgent?.id, provider.id);
+      }
+      return;
+    }
+
+    // 0.7 Genuinely multi-step objective → tracked Mission instead of one-shot.
+    const missionDecision = await decideMissionIntent(provider.id, activeKey, task, model);
+    if (missionDecision.isMission) {
+      const mission = await createMission(user.uid, currentChatId, task, missionDecision.subtasks);
+      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+      await launchMission(mission, currentChatId);
       return;
     }
 
@@ -1258,7 +1259,7 @@ export default function HomePage() {
                   }}
                 />
               ))}
-               
+
               {activeMission && activeMission.chatId === chatId && (
                 <MissionCard 
                   mission={activeMission} 
