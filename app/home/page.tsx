@@ -188,6 +188,30 @@ export default function HomePage() {
   const [missionsOpen, setMissionsOpen] = useState(false);
   const [activeMission, setActiveMission] = useState<Mission | null>(null);
   const missionCancelledRef = useRef(false);
+  // 0.6 "Continue" — resume the latest unfinished mission for this chat.
+  const continueDecision = await decideContinueIntent(provider.id, activeKey, task, model);
+  if (continueDecision.wantsContinue) {
+    const resumable = await findResumableMission(user.uid, currentChatId);
+    await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+    if (resumable) {
+      await launchMission(resumable, currentChatId);
+    } else {
+      const noMissionMsg: ChatMessage = { role: "assistant", content: "I don't see an unfinished mission for this chat to continue." };
+      const finalMessages = [...nextMessages, noMissionMsg];
+      setMessages(finalMessages);
+      await persist(finalMessages, currentChatId, activeAgent?.id, provider.id);
+    }
+    return;
+  }
+
+// 0.7 Genuinely multi-step objective → tracked Mission instead of one-shot.
+  const missionDecision = await decideMissionIntent(provider.id, activeKey, task, model);
+  if (missionDecision.isMission) {
+    const mission = await createMission(user.uid, currentChatId, task, missionDecision.subtasks);
+    await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+    await launchMission(mission, currentChatId);
+    return;
+  }
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
