@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
+import { adminAuth } from "@/lib/firebaseAdmin";
+import { resolveIntegrationSecret } from "@/lib/secretsResolve";
 import { startBrowserSession } from "@/lib/browserUse";
 
 export const maxDuration = 60;
@@ -10,9 +11,7 @@ export async function POST(req: NextRequest) {
     if (!idToken) return NextResponse.json({ error: "Missing auth token." }, { status: 401 });
     const decoded = await adminAuth().verifyIdToken(idToken);
 
-    const settingsSnap = await adminDb()
-      .collection("users").doc(decoded.uid).collection("settings").doc("integrations").get();
-    const apiKey = settingsSnap.exists ? (settingsSnap.data()?.browserlessApiKey as string | undefined) : undefined;
+    const apiKey = await resolveIntegrationSecret(decoded.uid, "browserlessApiKey");
     if (!apiKey) {
       return NextResponse.json({ error: "No Browserless API key — add yours in Settings → Integrations." }, { status: 400 });
     }
