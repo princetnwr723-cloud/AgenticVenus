@@ -1,13 +1,6 @@
 // lib/pluginConnections.ts
-// Tracks which plugins the user has connected, so the agent can know
-// what tools it actually has access to. This marks a tool as connected
-// in Firestore — it isn't wired to each service's real OAuth flow yet
-// (that's the next step for each one individually), but it's what makes
-// the rest of the tool-awareness system (detecting a needed tool,
-// prompting to connect it, telling the agent what it can use) work today.
-
 import { collection, deleteDoc, doc, getDocs, setDoc, serverTimestamp } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { db, auth } from "@/lib/firebase";
 import { PLUGIN_TOOLS } from "@/lib/plugins";
 
 export async function listConnectedPluginIds(uid: string): Promise<string[]> {
@@ -21,11 +14,20 @@ export async function connectPlugin(uid: string, toolId: string) {
   await setDoc(ref, { connectedAt: serverTimestamp() });
 }
 
-/** For the handful of plugins that just need a pasted key/token (Wolfram
- * Alpha, Perplexity, Zapier, Make) rather than a full OAuth login. */
+/** Wolfram Alpha, Perplexity, Zapier, Make — single-key tools. The key is
+ * encrypted server-side; the client never writes it directly to Firestore. */
 export async function connectPluginWithApiKey(uid: string, toolId: string, apiKey: string) {
-  const ref = doc(db, "users", uid, "pluginConnections", toolId);
-  await setDoc(ref, { apiKey, connectedAt: serverTimestamp() });
+  const idToken = await auth.currentUser?.getIdToken();
+  if (!idToken) throw new Error("Not signed in.");
+  const res = await fetch("/api/secrets/plugin-key", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${idToken}` },
+    body: JSON.stringify({ toolId, apiKey }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.error || "Failed to connect.");
+  }
 }
 
 export async function disconnectPlugin(uid: string, toolId: string) {
@@ -37,12 +39,6 @@ export function connectedToolNames(connectedIds: string[]): string[] {
   return PLUGIN_TOOLS.filter((t) => connectedIds.includes(t.id)).map((t) => t.name);
 }
 
-/** A plugin should count as "connected" if either its own toggle is on,
- * OR the user already has a real MCP server connected whose name matches
- * it (e.g. an MCP server literally named "Gmail" covers the Gmail
- * plugin). This is what makes the tool-awareness system recognize a
- * Gmail MCP connection instead of asking to "connect Gmail in Plugins"
- * when it's already working through MCP. */
 export function effectiveConnectedToolIds(
   connectedIds: string[],
   mcpServers: { name: string }[]
