@@ -28,9 +28,6 @@ import AgentStatusLine from "@/components/AgentStatusLine";
 import PlanApprovalCard from "@/components/PlanApprovalCard";
 import MissionsPanel from "@/components/MissionsPanel";
 import MissionCard from "@/components/MissionCard";
-import { createMission, findResumableMission, type Mission } from "@/lib/missions";
-import { decideMissionIntent, decideContinueIntent } from "@/lib/missionPlanner";
-import { runMission } from "@/lib/missionEngine";
 import { startComputerSession, stopComputerSession, runComputerTask } from "@/lib/computerClient";
 import { startBrowserSession, stopBrowserSession, runBrowserTask } from "@/lib/browserClient";
 import { decideAutoTools, type AutoToolDecision } from "@/lib/autoTools";
@@ -43,6 +40,11 @@ import { listAgentConnections, type AgentConnection } from "@/lib/agentLinks";
 import { askConnectedAgent } from "@/lib/agentLinkOrchestrator";
 import { listChatGroups, type ChatGroup } from "@/lib/chatGroups";
 import { getAgentIdentity, saveAgentIdentity, type AgentIdentity } from "@/lib/agentIdentity";
+import { createMission, findResumableMission, type Mission } from "@/lib/missions";
+import { decideMissionIntent, decideContinueIntent } from "@/lib/missionPlanner";
+import { runMission } from "@/lib/missionEngine";
+import { verifyTaskResult } from "@/lib/verification";
+import { withRecovery } from "@/lib/recoveryEngine";
 import FilesPanel from "@/components/FilesPanel";
 import {
   getPrimaryConnection,
@@ -128,12 +130,15 @@ export default function HomePage() {
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [connectionsOpen, setConnectionsOpen] = useState(false);
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
+  const [missionsOpen, setMissionsOpen] = useState(false);
 
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
   const [classifying, setClassifying] = useState(false);
   const [agentStatus, setAgentStatus] = useState<string | null>(null);
   const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
   const [planBusy, setPlanBusy] = useState(false);
+  const [activeMission, setActiveMission] = useState<Mission | null>(null);
+  const missionCancelledRef = useRef(false);
 
   const [groups, setGroups] = useState<AgentGroup[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
@@ -185,40 +190,6 @@ export default function HomePage() {
   const [browserStepLog, setBrowserStepLog] = useState<string[]>([]);
   const [browserRunning, setBrowserRunning] = useState(false);
   const browserAutoStarted = useRef(false);
-  const [missionsOpen, setMissionsOpen] = useState(false);
-  const [activeMission, setActiveMission] = useState<Mission | null>(null);
-  const missionCancelledRef = useRef(false);
-
-  async function launchMission(mission: Mission, targetChatId: string) {
-    if (!activeConnection) return;
-    missionCancelledRef.current = false;
-    setActiveMission(mission);
-    const { provider, apiKey: activeKey, model } = activeConnection;
-    const final = await runMission(
-      user!.uid, provider.id, activeKey, mission,
-      !!integrationKeys.browserlessApiKey, !!integrationKeys.daytonaApiKey, model,
-      (m) => setActiveMission(m),
-      (s) => setAgentStatus(s),
-      () => missionCancelledRef.current
-    );
-    setAgentStatus(null);
-    if (final.summary) {
-      const summaryMsg: ChatMessage = { role: "assistant", content: final.summary };
-      const finalMessages = [...messages, summaryMsg];
-      setMessages(finalMessages);
-      await persist(finalMessages, targetChatId, activeAgent?.id, provider.id);
-    }
-  }
-
-  function handleCancelMission() {
-    missionCancelledRef.current = true;
-  }
-
-  async function handleResumeMission(mission: Mission) {
-    setMissionsOpen(false);
-    if (mission.chatId !== chatId) await handleSelectChat(mission.chatId);
-    await launchMission(mission, mission.chatId);
-  }
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -381,7 +352,7 @@ export default function HomePage() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages, sending, pendingPlan]);
+  }, [messages, sending, pendingPlan, activeMission]);
 
   useEffect(() => {
     if (!user || !chatId || !telegram?.botUsername) return;
@@ -408,7 +379,6 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ceoMode, chatId, activeConnection?.provider.id]);
 
-  // Load this chat's own agent identity whenever the chat changes.
   useEffect(() => {
     if (!user || !chatId) {
       setAgentIdentity(null);
@@ -449,6 +419,7 @@ export default function HomePage() {
     setCeoMode(false);
     setToolNeed(null);
     setPendingPlan(null);
+    setActiveMission(null);
     setActiveGroupId(null);
     setActiveChatGroup(null);
     setActiveProviderId(connected?.id ?? null);
@@ -468,6 +439,7 @@ export default function HomePage() {
     setActiveGroupId(chat.groupId ?? null);
     setToolNeed(null);
     setPendingPlan(null);
+    setActiveMission(null);
     setGreeting(null);
     setError(null);
   }
@@ -516,19 +488,19 @@ export default function HomePage() {
     }
   }
 
+  async function handleStopComputer() {
+    if (computerSandboxId) await stopComputerSession(computerSandboxId);
+    setComputerSandboxId(null);
+    setComputerStreamUrl(null);
+    setComputerStepLog([]);
+  }
+
   async function handleOpenRawComputerLink() {
     if (!computerSandboxId) return;
     const idToken = await auth.currentUser?.getIdToken();
     const res = await fetch(`/api/computer/raw-link?sandboxId=${computerSandboxId}&token=${idToken}`);
     const data = await res.json();
     if (data.url) window.open(data.url, "_blank");
-  }
-
-  async function handleStopComputer() {
-    if (computerSandboxId) await stopComputerSession(computerSandboxId);
-    setComputerSandboxId(null);
-    setComputerStreamUrl(null);
-    setComputerStepLog([]);
   }
 
   async function handleRunComputerTask(task: string) {
@@ -697,6 +669,38 @@ export default function HomePage() {
     }
   }
 
+  // ---------- Mission lifecycle (Phase 2 + Phase 4: real parallel DAG) ----------
+  async function launchMission(mission: Mission, targetChatId: string) {
+    if (!activeConnection || !user) return;
+    missionCancelledRef.current = false;
+    setActiveMission(mission);
+    const { provider, apiKey: activeKey, model } = activeConnection;
+    const final = await runMission(
+      user.uid, provider.id, activeKey, mission,
+      !!integrationKeys.browserlessApiKey, !!integrationKeys.daytonaApiKey, model,
+      (m) => setActiveMission(m),
+      (s) => setAgentStatus(s),
+      () => missionCancelledRef.current
+    );
+    setAgentStatus(null);
+    if (final.summary) {
+      const summaryMsg: ChatMessage = { role: "assistant", content: final.summary };
+      const finalMessages = [...messages, summaryMsg];
+      setMessages(finalMessages);
+      await persist(finalMessages, targetChatId, activeAgent?.id, provider.id);
+    }
+  }
+
+  function handleCancelMission() {
+    missionCancelledRef.current = true;
+  }
+
+  async function handleResumeMission(mission: Mission) {
+    setMissionsOpen(false);
+    if (mission.chatId !== chatId) await handleSelectChat(mission.chatId);
+    await launchMission(mission, mission.chatId);
+  }
+
   async function processTask(task: string, attachments: Attachment[] = []) {
     if (!activeConnection || !user) {
       setForceSelect(true);
@@ -722,6 +726,7 @@ export default function HomePage() {
     setGreeting(null);
     setToolNeed(null);
     setPendingPlan(null);
+    setActiveMission(null);
 
     let currentChatId = chatId;
     if (!currentChatId) {
@@ -746,7 +751,16 @@ export default function HomePage() {
       return;
     }
 
-    // 0.6 "Continue" — resume the latest unfinished mission for this chat.
+    const effectiveToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
+    const need = await detectToolNeed(provider.id, activeKey, nextMessages, effectiveToolIds, model);
+    if (need && !need.connected) {
+      setToolNeed(need);
+      setPendingTaskAfterConnect(task);
+      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+      return;
+    }
+
+    // "Continue" — resume the latest unfinished mission for this chat.
     const continueDecision = await decideContinueIntent(provider.id, activeKey, task, model);
     if (continueDecision.wantsContinue) {
       const resumable = await findResumableMission(user.uid, currentChatId);
@@ -762,7 +776,8 @@ export default function HomePage() {
       return;
     }
 
-    // 0.7 Genuinely multi-step objective → tracked Mission instead of one-shot.
+    // Genuinely multi-step objective → tracked Mission with a real
+    // dependency graph, instead of a one-shot reply.
     const missionDecision = await decideMissionIntent(provider.id, activeKey, task, model);
     if (missionDecision.isMission) {
       const mission = await createMission(user.uid, currentChatId, task, missionDecision.subtasks);
@@ -771,16 +786,6 @@ export default function HomePage() {
       return;
     }
 
-    const effectiveToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
-    const need = await detectToolNeed(provider.id, activeKey, nextMessages, effectiveToolIds, model);
-    if (need && !need.connected) {
-      setToolNeed(need);
-      setPendingTaskAfterConnect(task);
-      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
-      return;
-    }
-
-    // Connected agents this chat can consult, named by their chat title.
     const myConnectedAgents = agentConnections
       .filter((c) => c.sourceChatId === currentChatId)
       .flatMap((c) => c.targetChatIds)
@@ -878,11 +883,14 @@ export default function HomePage() {
       }
     }
 
+    // Phase 3: browser/computer autonomous use, now with genuine
+    // verification + classified retry/backoff/circuit-breaker recovery
+    // instead of trusting the raw result blindly.
     if (autoDecision.needsBrowser) {
       let sid = browserSessionId;
       let autoStarted = false;
       setAgentStatus("🌐 Starting the browser...");
-      try {
+      const recovery = await withRecovery(`browser:${user.uid}`, async () => {
         if (!sid) {
           const started = await startBrowserSession();
           sid = started.sessionId;
@@ -891,26 +899,31 @@ export default function HomePage() {
           autoStarted = true;
           browserAutoStarted.current = true;
         }
-        const summary = await runBrowserTask(provider.id, activeKey, sid, task, model, (s) => setAgentStatus(`🌐 ${s}`));
-        toolResultNote += `\n\nYou just used the browser and accomplished: ${summary}\n\nMention what you found/did naturally in your reply.`;
-      } catch (err) {
-        toolResultNote += `\n\nYou tried to use the browser but it failed: ${err instanceof Error ? err.message : "unknown error"}. Tell the user plainly.`;
-      } finally {
-        if (autoStarted && browserAutoStarted.current) {
-          await stopBrowserSession(sid!);
-          setBrowserSessionId(null);
-          setBrowserLiveUrl(null);
-          browserAutoStarted.current = false;
-        }
-        setAgentStatus(null);
+        const summary = await runBrowserTask(provider.id, activeKey, sid!, task, model, (s) => setAgentStatus(`🌐 ${s}`));
+        const verdict = await verifyTaskResult(provider.id, activeKey, task, summary, model);
+        if (!verdict.verified) throw new Error(verdict.reason || "Couldn't verify the browser result.");
+        return summary;
+      });
+
+      if (recovery.ok) {
+        toolResultNote += `\n\nYou just used the browser and accomplished (verified): ${recovery.value}\n\nMention what you found/did naturally in your reply.`;
+      } else {
+        toolResultNote += `\n\nYou tried to use the browser but couldn't get a verified result after ${recovery.attempts} attempt(s): ${recovery.error.suggestion} (${recovery.rawMessage}). Tell the user plainly what was attempted and what's uncertain — don't claim success.`;
       }
+      if (autoStarted && browserAutoStarted.current) {
+        await stopBrowserSession(sid!);
+        setBrowserSessionId(null);
+        setBrowserLiveUrl(null);
+        browserAutoStarted.current = false;
+      }
+      setAgentStatus(null);
     }
 
     if (autoDecision.needsComputer) {
       let sbx = computerSandboxId;
       let autoStarted = false;
       setAgentStatus("🖥️ Starting the computer...");
-      try {
+      const recovery = await withRecovery(`computer:${user.uid}`, async () => {
         if (!sbx) {
           const started = await startComputerSession();
           sbx = started.sandboxId;
@@ -920,19 +933,24 @@ export default function HomePage() {
           autoStarted = true;
           computerAutoStarted.current = true;
         }
-        const summary = await runComputerTask(provider.id, activeKey, sbx, task, model, (s) => setAgentStatus(`🖥️ ${s}`));
-        toolResultNote += `\n\nYou just used the computer and accomplished: ${summary}\n\nMention what you did naturally in your reply.`;
-      } catch (err) {
-        toolResultNote += `\n\nYou tried to use the computer but it failed: ${err instanceof Error ? err.message : "unknown error"}. Tell the user plainly.`;
-      } finally {
-        if (autoStarted && computerAutoStarted.current) {
-          await stopComputerSession(sbx!);
-          setComputerSandboxId(null);
-          setComputerStreamUrl(null);
-          computerAutoStarted.current = false;
-        }
-        setAgentStatus(null);
+        const summary = await runComputerTask(provider.id, activeKey, sbx!, task, model, (s) => setAgentStatus(`🖥️ ${s}`));
+        const verdict = await verifyTaskResult(provider.id, activeKey, task, summary, model);
+        if (!verdict.verified) throw new Error(verdict.reason || "Couldn't verify the computer result.");
+        return summary;
+      });
+
+      if (recovery.ok) {
+        toolResultNote += `\n\nYou just used the computer and accomplished (verified): ${recovery.value}\n\nMention what you did naturally in your reply.`;
+      } else {
+        toolResultNote += `\n\nYou tried to use the computer but couldn't get a verified result after ${recovery.attempts} attempt(s): ${recovery.error.suggestion} (${recovery.rawMessage}). Tell the user plainly what was attempted and what's uncertain — don't claim success.`;
       }
+      if (autoStarted && computerAutoStarted.current) {
+        await stopComputerSession(sbx!);
+        setComputerSandboxId(null);
+        setComputerStreamUrl(null);
+        computerAutoStarted.current = false;
+      }
+      setAgentStatus(null);
     }
 
     const activeCatalogGroup = groups.find((g) => g.id === activeGroupId) || null;
@@ -952,11 +970,12 @@ export default function HomePage() {
         ? "You have real, autonomous access to a web browser — you decide yourself when a task needs browsing, research, or reading a link, and start/stop it without the user pressing any button. If asked to install a skill from a link, you install it directly."
         : null,
       integrationKeys.vercelApiToken || integrationKeys.netlifyApiToken
-        ? "You can Publish anything built in Codespace to a real live URL (Vercel/Netlify) — mention the Publish button once code is ready."
+        ? "You can Publish anything built in Codespace to a real live URL (Vercel/Netlify), and that publish is automatically verified as genuinely live — mention the Publish button once code is ready."
         : null,
       agentConnections.some((c) => c.sourceChatId === currentChatId)
         ? "You have other agents connected that you can consult when the user explicitly wants their input."
         : null,
+      "For genuinely multi-step objectives (multiple independent pieces of research, a build-and-deploy, etc.), you track it as a Mission — a real dependency graph where independent parts run in parallel — with retry and verification per step, resumable if interrupted.",
     ]
       .filter(Boolean)
       .join("\n");
@@ -996,11 +1015,10 @@ export default function HomePage() {
     setActiveAgent(agent);
     setClassifying(false);
 
-    const identity = agentIdentity || (chatId ? null : null);
     const lessons = await getAgentLessons(user.uid, agent.id);
     const systemPrompt = [
       agent.systemPrompt,
-      identity?.customPrompt ? `Additional instructions specific to you (${identity.name}): ${identity.customPrompt}` : null,
+      agentIdentity?.customPrompt ? `Additional instructions specific to you (${agentIdentity.name}): ${agentIdentity.customPrompt}` : null,
       buildBusinessContext(businessDNA),
       toolsContext,
       infraToolsContext,
@@ -1262,10 +1280,8 @@ export default function HomePage() {
               ))}
 
               {activeMission && activeMission.chatId === chatId && (
-                <MissionCard 
-                  mission={activeMission} 
-                  onCancel={handleCancelMission} />
-                )}
+                <MissionCard mission={activeMission} onCancel={handleCancelMission} />
+              )}
 
               {pendingPlan && (
                 <PlanApprovalCard
@@ -1445,6 +1461,7 @@ export default function HomePage() {
           onSave={handleSaveAgentIdentity}
         />
       )}
+      <MissionsPanel uid={user.uid} open={missionsOpen} onClose={() => setMissionsOpen(false)} onResume={handleResumeMission} />
       <CodespacePanel
         open={codespaceOpen}
         onClose={() => {
@@ -1484,6 +1501,7 @@ export default function HomePage() {
         stepLog={computerStepLog}
         onRunTask={handleRunComputerTask}
         running={computerRunning}
+        onOpenRawLink={handleOpenRawComputerLink}
       />
       <BrowserViewPanel
         open={browserViewOpen}
@@ -1496,11 +1514,6 @@ export default function HomePage() {
         stepLog={browserStepLog}
         onRunTask={handleRunBrowserTask}
         running={browserRunning}
-      />
-      <MissionsPanel uid={user.uid} 
-        open={missionsOpen} 
-        onClose={() => setMissionsOpen(false)} 
-        onResume={handleResumeMission}
       />
       <SettingsPanel
         uid={user.uid}
