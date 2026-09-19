@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
+import { adminAuth } from "@/lib/firebaseAdmin";
+import { resolveIntegrationSecret } from "@/lib/secretsResolve";
 import { getSignedPreviewUrl } from "@/lib/computerUse";
 
 export async function GET(req: NextRequest) {
@@ -8,8 +9,7 @@ export async function GET(req: NextRequest) {
   if (!sandboxId || !token) return NextResponse.json({ error: "Missing params." }, { status: 400 });
   try {
     const decoded = await adminAuth().verifyIdToken(token);
-    const settingsSnap = await adminDb().collection("users").doc(decoded.uid).collection("settings").doc("integrations").get();
-    const apiKey = settingsSnap.exists ? (settingsSnap.data()?.daytonaApiKey as string | undefined) : undefined;
+    const apiKey = await resolveIntegrationSecret(decoded.uid, "daytonaApiKey");
     if (!apiKey) return NextResponse.json({ error: "No Daytona API key." }, { status: 400 });
     const signed = await getSignedPreviewUrl(sandboxId, apiKey, 6080);
     return NextResponse.json({ url: `${signed.url}/vnc.html?autoconnect=true&resize=remote` });
