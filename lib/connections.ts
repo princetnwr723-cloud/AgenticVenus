@@ -1,19 +1,11 @@
 // lib/connections.ts
-// Reads/writes the AI provider connections a user has saved under
-// users/{uid}/connections in Firestore. A user can have several
-// providers connected at once — one is the workspace default, but any
-// chat can use a different one via the Settings panel.
+// Provider API keys (Claude, GPT, Gemini, etc.) are now encrypted at
+// rest — reads/writes go through /api/secrets/connections instead of
+// touching Firestore directly for the apiKey field. Model choice isn't
+// sensitive, so it still writes via the client SDK directly.
 
-import {
-  collection,
-  doc,
-  getDocs,
-  orderBy,
-  query,
-  limit,
-  setDoc,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { doc, setDoc } from "firebase/firestore";
+import { db, auth } from "@/lib/firebase";
 import { PROVIDERS, type Provider } from "@/lib/providers";
 
 export type SavedConnection = {
@@ -22,44 +14,50 @@ export type SavedConnection = {
   model?: string;
 };
 
+async function authedHeaders() {
+  const idToken = await auth.currentUser?.getIdToken();
+  if (!idToken) throw new Error("Not signed in.");
+  return { "content-type": "application/json", authorization: `Bearer ${idToken}` };
+}
+
+async function fetchConnections(): Promise<(SavedConnection & { connectedAt: number })[]> {
+  const res = await fetch("/api/secrets/connections", { headers: await authedHeaders() });
+  const data = await res.json();
+  if (!res.ok) return [];
+  return (data.connections as any[])
+    .map((c) => {
+      const provider = PROVIDERS.find((p) => p.id === c.providerId);
+      if (!provider) return null;
+      return { provider, apiKey: c.apiKey, model: c.model, connectedAt: c.connectedAt || 0 };
+    })
+    .filter(Boolean) as (SavedConnection & { connectedAt: number })[];
+}
+
 /** Returns the most recently connected provider + key, or null if none. */
-export async function getPrimaryConnection(
-  uid: string
-): Promise<SavedConnection | null> {
-  const ref = collection(db, "users", uid, "connections");
-  const q = query(ref, orderBy("connectedAt", "desc"), limit(1));
-  const snap = await getDocs(q);
-  if (snap.empty) return null;
-
-  const data = snap.docs[0].data();
-  const provider = PROVIDERS.find((p) => p.id === data.providerId);
-  if (!provider || !data.apiKey) return null;
-
-  return { provider, apiKey: data.apiKey, model: data.model };
+export async function getPrimaryConnection(uid: string): Promise<SavedConnection | null> {
+  const all = await fetchConnections();
+  if (all.length === 0) return null;
+  return all.sort((a, b) => b.connectedAt - a.connectedAt)[0];
 }
 
 /** Returns every provider connection the user has saved. */
 export async function getAllConnections(uid: string): Promise<SavedConnection[]> {
-  const ref = collection(db, "users", uid, "connections");
-  const snap = await getDocs(ref);
-  const out: SavedConnection[] = [];
-  for (const d of snap.docs) {
-    const data = d.data();
-    const provider = PROVIDERS.find((p) => p.id === data.providerId);
-    if (provider && data.apiKey) {
-      out.push({ provider, apiKey: data.apiKey, model: data.model });
-    }
-  }
-  return out;
+  return fetchConnections();
 }
 
-/** Saves which specific model a connection should use (from the live
- * model list in lib/modelList.ts). */
-export async function updateConnectionModel(
-  uid: string,
-  providerId: string,
-  model: string
-) {
+export async function saveConnection(providerId: string, providerName: string, apiKey: string): Promise<void> {
+  const res = await fetch("/api/secrets/connections", {
+    method: "POST",
+    headers: await authedHeaders(),
+    body: JSON.stringify({ providerId, providerName, apiKey }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.error || "Failed to save the connection.");
+  }
+}
+
+export async function updateConnectionModel(uid: string, providerId: string, model: string) {
   const ref = doc(db, "users", uid, "connections", providerId);
   await setDoc(ref, { model }, { merge: true });
 }
