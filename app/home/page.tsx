@@ -1081,6 +1081,7 @@ export default function HomePage() {
           onOpenSkills={() => setSkillsOpen(true)}
           onOpenPricing={() => setPricingOpen(true)}
           onOpenConnections={() => setConnectionsOpen(true)}
+          onOpenMissions={() => setMissionsOpen(true)}
           onLogout={() => signOut(auth)}
         />
       )}
