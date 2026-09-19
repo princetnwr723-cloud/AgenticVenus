@@ -1,8 +1,12 @@
 "use client";
 
-import type { Mission } from "@/lib/missions";
+import type { Mission, WorkerType } from "@/lib/missions";
 
-const ICON: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✕", skipped: "—" };
+const STATUS_ICON: Record<string, string> = { pending: "○", running: "◐", done: "✓", failed: "✕", skipped: "—" };
+const WORKER_ICON: Record<WorkerType, string> = {
+  planner: "🧭", researcher: "🔎", browser: "🌐", computer: "🖥️", coder: "💻",
+  data: "📊", file: "📁", qa: "✅", writer: "✍️", security: "🛡️",
+};
 
 export default function MissionCard({ mission, onCancel }: { mission: Mission; onCancel?: () => void }) {
   const done = mission.subtasks.filter((s) => s.status === "done").length;
@@ -16,9 +20,12 @@ export default function MissionCard({ mission, onCancel }: { mission: Mission; o
         {mission.subtasks.map((s) => (
           <li key={s.id} className="flex items-center gap-2 text-sm">
             <span className={s.status === "done" ? "text-moss" : s.status === "failed" ? "text-red-600" : s.status === "running" ? "text-clay animate-pulse" : "text-ink/30"}>
-              {ICON[s.status]}
+              {STATUS_ICON[s.status]}
             </span>
-            <span className={s.status === "failed" ? "text-red-700" : "text-ink/75"}>{s.description}</span>
+            <span className="text-xs">{WORKER_ICON[s.workerType]}</span>
+            <span className={s.status === "failed" ? "text-red-700" : s.status === "skipped" ? "text-ink/35 line-through" : "text-ink/75"}>
+              {s.description}
+            </span>
           </li>
         ))}
       </ul>
