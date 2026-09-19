@@ -16,6 +16,7 @@ type Props = {
   onOpenSkills: () => void;
   onOpenPricing: () => void;
   onOpenConnections: () => void;
+  onOpenMissions: () => void;
   onLogout: () => void;
   chats: ChatSummary[];
   groups: ChatGroup[];
@@ -37,6 +38,7 @@ export default function Sidebar({
   onOpenSkills,
   onOpenPricing,
   onOpenConnections,
+  onOpenMissions,
   onLogout,
   chats,
   groups,
