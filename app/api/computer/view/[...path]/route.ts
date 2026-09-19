@@ -1,13 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
+import { adminAuth } from "@/lib/firebaseAdmin";
+import { resolveIntegrationSecret } from "@/lib/secretsResolve";
 import { getSignedPreviewUrl } from "@/lib/computerUse";
 
 const VNC_PORT = 6080;
 const TEXT_LIKE = /\.(html?|css|js|mjs|json|svg|xml|txt)$/i;
 const SKIP_HEADERS = { "X-Daytona-Skip-Preview-Warning": "true" };
-// Always force autoconnect ourselves — letting the proxy "discover" the
-// real entry link was the bug: the discovered href had no query params,
-// silently overriding autoconnect and leaving a manual Connect button.
 const DEFAULT_ENTRY = "vnc.html?autoconnect=true&resize=remote&reconnect=true&path=api/computer/view";
 
 export async function GET(req: NextRequest, { params }: { params: { path: string[] } }) {
@@ -17,9 +15,7 @@ export async function GET(req: NextRequest, { params }: { params: { path: string
 
   try {
     const decoded = await adminAuth().verifyIdToken(token);
-    const settingsSnap = await adminDb()
-      .collection("users").doc(decoded.uid).collection("settings").doc("integrations").get();
-    const apiKey = settingsSnap.exists ? (settingsSnap.data()?.daytonaApiKey as string | undefined) : undefined;
+    const apiKey = await resolveIntegrationSecret(decoded.uid, "daytonaApiKey");
     if (!apiKey) return new NextResponse("No Daytona API key configured.", { status: 400 });
 
     const signed = await getSignedPreviewUrl(sandboxId, apiKey, VNC_PORT);
