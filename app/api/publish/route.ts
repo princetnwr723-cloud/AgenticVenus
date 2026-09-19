@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
+import { adminAuth } from "@/lib/firebaseAdmin";
+import { resolveIntegrationSecret } from "@/lib/secretsResolve";
 import { publishToVercel, publishToNetlify } from "@/lib/publish";
 import type { CodeFile } from "@/lib/codeExtract";
 
@@ -18,17 +19,15 @@ export async function POST(req: NextRequest) {
     const { target, files, projectName } = (await req.json()) as { target: "vercel" | "netlify"; files: CodeFile[]; projectName?: string };
     if (!target || !files?.length) return NextResponse.json({ error: "target and files are required." }, { status: 400 });
 
-    const settingsSnap = await adminDb().collection("users").doc(decoded.uid).collection("settings").doc("integrations").get();
-    const settings = settingsSnap.exists ? settingsSnap.data() : {};
     const name = slugify(projectName || "agenticvenus-project");
 
     if (target === "vercel") {
-      const token = settings?.vercelApiToken;
+      const token = await resolveIntegrationSecret(decoded.uid, "vercelApiToken");
       if (!token) return NextResponse.json({ error: "No Vercel API token — add yours in Settings → Integrations." }, { status: 400 });
       return NextResponse.json({ ok: true, ...(await publishToVercel(files, token, name)) });
     }
     if (target === "netlify") {
-      const token = settings?.netlifyApiToken;
+      const token = await resolveIntegrationSecret(decoded.uid, "netlifyApiToken");
       if (!token) return NextResponse.json({ error: "No Netlify API token — add yours in Settings → Integrations." }, { status: 400 });
       return NextResponse.json({ ok: true, ...(await publishToNetlify(files, token, name)) });
     }
