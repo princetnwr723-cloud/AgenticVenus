@@ -1258,6 +1258,12 @@ export default function HomePage() {
                   }}
                 />
               ))}
+               
+              {activeMission && activeMission.chatId === chatId && (
+                <MissionCard 
+                  mission={activeMission} 
+                  onCancel={handleCancelMission} />
+                )}
 
               {pendingPlan && (
                 <PlanApprovalCard
@@ -1488,6 +1494,11 @@ export default function HomePage() {
         stepLog={browserStepLog}
         onRunTask={handleRunBrowserTask}
         running={browserRunning}
+      />
+      <MissionsPanel uid={user.uid} 
+        open={missionsOpen} 
+        onClose={() => setMissionsOpen(false)} 
+        onResume={handleResumeMission}
       />
       <SettingsPanel
         uid={user.uid}
