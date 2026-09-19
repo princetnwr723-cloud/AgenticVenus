@@ -74,6 +74,7 @@ export default function Sidebar({
         <NavItem icon={<ConnectionIcon />} label="Connections" onClick={onOpenConnections} />
         <NavItem icon={<BusinessIcon />} label="Business DNA" onClick={onOpenBusinessDNA} />
         <NavItem icon={<PlanIcon />} label="Plans" onClick={onOpenPricing} />
+        <NavItem icon={<MissionIcon />} label="Missions" onClick={onOpenMissions} />
       </div>
 
       {groups.length > 0 && (
