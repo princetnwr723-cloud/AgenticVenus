@@ -1,8 +1,18 @@
+// lib/autoTools.ts
+// CRITICAL FIX: this used to silently return needsBrowser=false whenever
+// a Browserless key wasn't configured — even if the task genuinely
+// needed one — so the agent had no idea it was missing a capability and
+// would just guess/hallucinate an answer instead. Now it always asks
+// what the task WANTS first, then separately flags "wanted but not
+// configured" so the caller can make the agent say so honestly.
+
 import { sendChatMessage } from "@/lib/chatClient";
 
 export type AutoToolDecision = {
   needsBrowser: boolean;
   needsComputer: boolean;
+  browserUnavailable: boolean; // task wants browsing but no key is configured
+  computerUnavailable: boolean;
   installSkillUrl: string | null;
   askAgentChatId: string | null;
 };
@@ -21,29 +31,32 @@ export async function decideAutoTools(
   connectedAgents: { chatId: string; name: string }[],
   model?: string
 ): Promise<AutoToolDecision> {
-  const none: AutoToolDecision = { needsBrowser: false, needsComputer: false, installSkillUrl: null, askAgentChatId: null };
-  if (!hasBrowser && !hasComputer && connectedAgents.length === 0) return none;
+  const none: AutoToolDecision = { needsBrowser: false, needsComputer: false, browserUnavailable: false, computerUnavailable: false, installSkillUrl: null, askAgentChatId: null };
 
   const agentsList = connectedAgents.map((a) => `${a.chatId}: ${a.name}`).join("\n") || "(none)";
 
-  const prompt = `Decide what this request needs, based on the latest message:\n"${task}"\n\nAvailable: ${
-    hasBrowser ? "a real web browser (browsing, research, reading a specific URL, web scraping, or installing a skill/SKILL.md from a link)" : ""
-  }${hasBrowser && hasComputer ? "; " : ""}${
-    hasComputer ? "a real cloud desktop computer (for anything needing a full OS or apps, not just a web page)" : ""
-  }.
+  const prompt = `Decide what this request genuinely needs to be done FOR REAL — based on what the task NEEDS, not on what happens to be configured right now:
+"${task}"
+
+Does it need real web browsing (visiting live sites, scraping data, reading a specific URL, current research, installing a skill from a link)?
+Does it need a real cloud desktop computer (running software, a full OS, apps)?
 
 Connected agents you could ask (chatId: name):
 ${agentsList}
 
 Reply with ONLY raw JSON:
-{"needsBrowser": boolean, "needsComputer": boolean, "installSkillUrl": "exact URL or null", "askAgentChatId": "a chatId from the list above ONLY if the user explicitly wants to consult that named agent, else null"}`;
+{"wantsBrowser": boolean, "wantsComputer": boolean, "installSkillUrl": "exact URL or null", "askAgentChatId": "a chatId from the list above ONLY if the user explicitly wants to consult that named agent, else null"}`;
 
   try {
     const { text } = await sendChatMessage({ providerId, apiKey, model, messages: [{ role: "user", content: prompt }] });
     const parsed = JSON.parse(extractJson(text));
+    const wantsBrowser = !!parsed.wantsBrowser;
+    const wantsComputer = !!parsed.wantsComputer;
     return {
-      needsBrowser: hasBrowser && !!parsed.needsBrowser,
-      needsComputer: hasComputer && !!parsed.needsComputer,
+      needsBrowser: hasBrowser && wantsBrowser,
+      needsComputer: hasComputer && wantsComputer,
+      browserUnavailable: wantsBrowser && !hasBrowser,
+      computerUnavailable: wantsComputer && !hasComputer,
       installSkillUrl: typeof parsed.installSkillUrl === "string" && /^https?:\/\//.test(parsed.installSkillUrl) ? parsed.installSkillUrl : null,
       askAgentChatId:
         typeof parsed.askAgentChatId === "string" && connectedAgents.some((a) => a.chatId === parsed.askAgentChatId)
