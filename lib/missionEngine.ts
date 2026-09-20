@@ -32,9 +32,17 @@ const WORKER_COLOR: Record<WorkerType, string> = {
 async function runOneSubtask(
   providerId: string, apiKey: string, objective: string, subtask: MissionSubtask,
   priorResults: string[], hasBrowser: boolean, hasComputer: boolean, model: string | undefined,
-  onStep: (s: string) => void
+  onStep: (s: string) => void, executeSubtask?: (subtask: MissionSubtask) => Promise<string>
 ): Promise<string> {
   const context = priorResults.length ? `Relevant results from finished subtasks:\n${priorResults.map((r, i) => `${i + 1}. ${r}`).join("\n")}\n\n` : "";
+
+  // Reuse the main application's proven executor pipeline for mission steps.
+  // This is what keeps email/plugins/browser/computer behavior identical to a
+  // normal command instead of turning missions into LLM-only cards.
+  if (executeSubtask) {
+    onStep(`⚙️ [${subtask.id}] Executing with the selected agent and real tools...`);
+    return executeSubtask(subtask);
+  }
 
   // A subtask explicitly assigned to a worker type that NEEDS a real
   // tool must actually use it — no silent fallback to guessing.
@@ -108,10 +116,10 @@ async function runOneSubtask(
 async function runAndVerify(
   uid: string, missionId: string, providerId: string, apiKey: string, objective: string,
   subtask: MissionSubtask, priorResults: string[], hasBrowser: boolean, hasComputer: boolean,
-  model: string | undefined, onStep: (s: string) => void
+  model: string | undefined, onStep: (s: string) => void, executeSubtask?: (subtask: MissionSubtask) => Promise<string>
 ): Promise<MissionSubtask> {
   const recovery = await withRecovery(`mission:${missionId}:${subtask.id}`, async () => {
-    const outcome = await runOneSubtask(providerId, apiKey, objective, subtask, priorResults, hasBrowser, hasComputer, model, onStep);
+    const outcome = await runOneSubtask(providerId, apiKey, objective, subtask, priorResults, hasBrowser, hasComputer, model, onStep, executeSubtask);
     const verdict = await verifyTaskResult(providerId, apiKey, subtask.description, outcome, model);
     if (!verdict.verified) throw new Error(verdict.reason || "Verification failed.");
     return outcome;
@@ -142,7 +150,8 @@ export async function runMission(
   hasBrowser: boolean, hasComputer: boolean, model: string | undefined,
   onUpdate: (mission: Mission) => void, onStep: (s: string) => void,
   isCancelled: () => boolean,
-  onSubtaskMessage: (msg: ChatMessage) => void | Promise<void>
+  onSubtaskMessage: (msg: ChatMessage) => void | Promise<void>,
+  executeSubtask?: (subtask: MissionSubtask) => Promise<string>
 ): Promise<Mission> {
   let current: Mission = { ...mission, subtasks: [...mission.subtasks] };
   const stillPending = () => current.subtasks.some((s) => s.status === "pending");
@@ -187,7 +196,7 @@ export async function runMission(
 
     await Promise.all(
       wave.map(async (s) => {
-        const result = await runAndVerify(uid, mission.id, providerId, apiKey, current.objective, s, priorResults, hasBrowser, hasComputer, model, onStep);
+        const result = await runAndVerify(uid, mission.id, providerId, apiKey, current.objective, s, priorResults, hasBrowser, hasComputer, model, onStep, executeSubtask);
         current.subtasks = current.subtasks.map((x) => (x.id === result.id ? result : x));
         onUpdate(current);
         await updateMission(uid, mission.id, { subtasks: current.subtasks });
