@@ -96,7 +96,6 @@ type PendingPlan = {
   autoDecision: AutoToolDecision;
   steps: string[];
   chatId: string;
-  mission?: Mission;
 };
 
 export default function HomePage() {
@@ -137,6 +136,8 @@ export default function HomePage() {
   const [classifying, setClassifying] = useState(false);
   const [agentStatus, setAgentStatus] = useState<string | null>(null);
   const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
+  const [pendingMission, setPendingMission] = useState<Mission | null>(null);
+  const [missionPlanBusy, setMissionPlanBusy] = useState(false);
   const [planBusy, setPlanBusy] = useState(false);
   const [activeMission, setActiveMission] = useState<Mission | null>(null);
   const missionCancelledRef = useRef(false);
@@ -420,6 +421,7 @@ export default function HomePage() {
     setCeoMode(false);
     setToolNeed(null);
     setPendingPlan(null);
+    setPendingMission(null);
     setActiveMission(null);
     setActiveGroupId(null);
     setActiveChatGroup(null);
@@ -440,6 +442,7 @@ export default function HomePage() {
     setActiveGroupId(chat.groupId ?? null);
     setToolNeed(null);
     setPendingPlan(null);
+    setPendingMission(null);
     setActiveMission(null);
     setGreeting(null);
     setError(null);
@@ -672,50 +675,75 @@ export default function HomePage() {
 
   // ---------- Mission lifecycle (Phase 2 + Phase 4: real parallel DAG) ----------
   async function launchMission(mission: Mission, targetChatId: string) {
-    if (!activeConnection || !user) return null;
+    if (!activeConnection || !user) return;
     missionCancelledRef.current = false;
     setActiveMission(mission);
     const { provider, apiKey: activeKey, model } = activeConnection;
 
     let liveMessages = messages;
 
-    const final = await runMission(
-      user.uid, provider.id, activeKey, mission,
-      !!integrationKeys.browserlessApiKey, !!integrationKeys.daytonaApiKey, model,
-      (m) => setActiveMission(m),
-      (s) => setAgentStatus(s),
-      () => missionCancelledRef.current,
-      async (msg) => {
+    const final = await runMission({
+      uid: user.uid,
+      providerId: provider.id,
+      apiKey: activeKey,
+      mission,
+      hasBrowser: !!integrationKeys.browserlessApiKey,
+      hasComputer: !!integrationKeys.daytonaApiKey,
+      model,
+      onUpdate: (m) => setActiveMission(m),
+      onStep: (s) => setAgentStatus(s),
+      isCancelled: () => missionCancelledRef.current,
+      onSubtaskMessage: async (msg) => {
         liveMessages = [...liveMessages, msg];
         setMessages(liveMessages);
         await persist(liveMessages, targetChatId, activeAgent?.id, provider.id);
       },
-      async (subtask) => {
-        // Mission execution reuses the SAME real tool pipeline as normal tasks.
-        // This prevents missions from becoming LLM-only "mission cards".
-        const missionAutoDecision = await decideAutoTools(
+      onPluginAction: async (taskForPlugin) => {
+        const availableToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
+        const planned = await decidePluginAction(
           provider.id,
           activeKey,
-          subtask.description,
-          !!integrationKeys.browserlessApiKey,
-          !!integrationKeys.daytonaApiKey,
-          agentConnections
-            .filter((c) => c.sourceChatId === targetChatId)
-            .flatMap((c) => c.targetChatIds)
-            .map((tid) => ({ chatId: tid, name: chats.find((c) => c.id === tid)?.title || tid })),
+          liveMessages,
+          availableToolIds,
           model
         );
-        const missionAgent = await classifyAgent(provider.id, activeKey, subtask.description, model);
-        setActiveAgent(missionAgent);
-        return (await executeTask(subtask.description, [], targetChatId, missionAutoDecision, true, missionAgent)) || "Task completed.";
-      }
-    );
+        if (!planned) return null;
+        setUsingPluginAction(planned.actionName);
+        try {
+          return await callPluginAction(planned.toolId, planned.actionId, planned.params);
+        } finally {
+          setUsingPluginAction(null);
+        }
+      },
+    });
     setAgentStatus(null);
     if (final.summary) {
       liveMessages = [...liveMessages, { role: "assistant", content: final.summary }];
       setMessages(liveMessages);
       await persist(liveMessages, targetChatId, activeAgent?.id, provider.id);
     }
+  }
+
+  async function handleApproveMission() {
+    if (!pendingMission) return;
+    setMissionPlanBusy(true);
+    const approved = { ...pendingMission, status: "running" as const };
+    setPendingMission(null);
+    setActiveMission(approved);
+    await updateMission(user!.uid, approved.id, { status: "running" });
+    await launchMission(approved, approved.chatId);
+    setMissionPlanBusy(false);
+  }
+
+  async function handleCancelMissionPlan() {
+    if (!pendingMission || !user) return;
+    await updateMission(user.uid, pendingMission.id, { status: "cancelled" });
+    setPendingMission(null);
+    setActiveMission({ ...pendingMission, status: "cancelled" });
+    const cancelMsg: ChatMessage = { role: "assistant", content: "Okay — I won't run that mission." };
+    const finalMessages = [...messages, cancelMsg];
+    setMessages(finalMessages);
+    await persist(finalMessages, pendingMission.chatId, activeAgent?.id, activeConnection?.provider.id);
   }
 
   function handleCancelMission() {
@@ -725,6 +753,11 @@ export default function HomePage() {
   async function handleResumeMission(mission: Mission) {
     setMissionsOpen(false);
     if (mission.chatId !== chatId) await handleSelectChat(mission.chatId);
+    setActiveMission(mission);
+    if (mission.status === "waiting_for_user") {
+      setPendingMission(mission);
+      return;
+    }
     await launchMission(mission, mission.chatId);
   }
 
@@ -753,6 +786,7 @@ export default function HomePage() {
     setGreeting(null);
     setToolNeed(null);
     setPendingPlan(null);
+    setPendingMission(null);
     setActiveMission(null);
 
     let currentChatId = chatId;
@@ -803,30 +837,30 @@ export default function HomePage() {
       return;
     }
 
-    // Genuinely multi-step objective → tracked Mission. IMPORTANT: choose the
-    // lead agent BEFORE creating the mission, then require approval before any
-    // real execution. The mission orchestrates the old working executors; it
-    // does not replace them.
-    const missionDecision = await decideMissionIntent(provider.id, activeKey, task, model);
-    if (missionDecision.isMission) {
-      setClassifying(true);
-      const leadAgent = await classifyAgent(provider.id, activeKey, task, model);
-      setActiveAgent(leadAgent);
-      setClassifying(false);
+    // Route the task to a specialist before creating a mission so the UI
+    // always shows the chosen agent even for multi-step work. The selected
+    // agent is context; the mission runtime still owns actual tool execution.
+    setClassifying(true);
+    const selectedAgent = await classifyAgent(provider.id, activeKey, task, model);
+    setClassifying(false);
+    setActiveAgent(selectedAgent);
 
-      const mission = await createMission(user.uid, currentChatId, task, missionDecision.subtasks);
-      await updateMission(user.uid, mission.id, { status: "waiting_for_user" });
+    // Genuinely multi-step objective → tracked Mission with a real
+    // dependency graph, instead of a one-shot reply.
+    const missionDecision = await decideMissionIntent(
+      provider.id,
+      activeKey,
+      task,
+      model,
+      { hasBrowser: !!integrationKeys.browserlessApiKey, hasComputer: !!integrationKeys.daytonaApiKey }
+    );
+    if (missionDecision.isMission) {
+      const mission = await createMission(user.uid, currentChatId, task, missionDecision.subtasks, selectedAgent.id);
       const waitingMission = { ...mission, status: "waiting_for_user" as const };
       setActiveMission(waitingMission);
-      await persist(nextMessages, currentChatId, leadAgent.id, provider.id);
-      setPendingPlan({
-        task,
-        attachments,
-        autoDecision: { needsBrowser: false, needsComputer: false, browserUnavailable: false, computerUnavailable: false, installSkillUrl: null, askAgentChatId: null },
-        steps: missionDecision.subtasks.map((s, i) => `${i + 1}. [${s.workerType}] ${s.description}`),
-        chatId: currentChatId,
-        mission: waitingMission,
-      });
+      setPendingMission(waitingMission);
+      await updateMission(user.uid, mission.id, { status: "waiting_for_user" });
+      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
       return;
     }
 
@@ -873,11 +907,9 @@ export default function HomePage() {
     task: string,
     attachments: Attachment[],
     currentChatId: string,
-    autoDecision: AutoToolDecision,
-    missionMode = false,
-    forcedAgent?: Agent
-  ): Promise<string | null> {
-    if (!activeConnection || !user) return null;
+    autoDecision: AutoToolDecision
+  ) {
+    if (!activeConnection || !user) return;
     const { provider, apiKey: activeKey, model } = activeConnection;
     const nextMessages = messages.some((m) => m.role === "user" && m.content === task)
       ? messages
@@ -1030,7 +1062,6 @@ export default function HomePage() {
 
     if (activeCatalogGroup) {
       setActiveAgent(null);
-      let groupFinalAnswer = "";
       try {
         const { turns, finalAnswer } = await runAgentGroup(provider.id, activeKey, activeCatalogGroup, task, nextMessages, model);
         const turnMessages: ChatMessage[] = turns.map((t) => ({
@@ -1039,7 +1070,6 @@ export default function HomePage() {
           agentName: t.agentName,
           agentColor: t.color,
         }));
-        groupFinalAnswer = finalAnswer;
         const synthesisMessage: ChatMessage = {
           role: "assistant",
           content: finalAnswer,
@@ -1049,26 +1079,17 @@ export default function HomePage() {
         const finalMessages = [...nextMessages, ...turnMessages, synthesisMessage];
         setMessages(finalMessages);
         await persist(finalMessages, currentChatId, undefined, provider.id);
-        if (!missionMode) await incrementTodayUsage(user.uid);
+        await incrementTodayUsage(user.uid);
       } catch (err) {
         setError(err instanceof Error ? err.message : "The group failed to complete the task.");
       } finally {
         setSending(false);
       }
-      return groupFinalAnswer;
+      return;
     }
 
-    let agent: Agent;
-    if (forcedAgent) {
-      agent = forcedAgent;
-      setActiveAgent(agent);
-      setClassifying(false);
-    } else {
-      setClassifying(true);
-      agent = await classifyAgent(provider.id, activeKey, task, model);
-      setActiveAgent(agent);
-      setClassifying(false);
-    }
+    setClassifying(false);
+    const agent = selectedAgent;
 
     const lessons = await getAgentLessons(user.uid, agent.id);
     const systemPrompt = [
@@ -1094,33 +1115,23 @@ export default function HomePage() {
         model,
       });
       const finalMessages = [...nextMessages, { role: "assistant" as const, content: text, usage }];
-      if (!missionMode) {
-        setMessages(finalMessages);
-        await persist(finalMessages, currentChatId, agent.id, provider.id);
-        await incrementTodayUsage(user.uid);
-        reflectAndLearn(user.uid, agent.id, provider.id, activeKey, task, text, model);
-      }
+      setMessages(finalMessages);
+      await persist(finalMessages, currentChatId, agent.id, provider.id);
+      await incrementTodayUsage(user.uid);
+      reflectAndLearn(user.uid, agent.id, provider.id, activeKey, task, text, model);
     } catch (err) {
-      if (!missionMode) setError(err instanceof Error ? err.message : "Something went wrong.");
-      return missionMode ? `Task failed: ${err instanceof Error ? err.message : "Something went wrong."}` : null;
+      setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setSending(false);
     }
-    return null;
   }
 
   async function handleApprovePlan() {
     if (!pendingPlan) return;
     setPlanBusy(true);
-    const { task, attachments, autoDecision, chatId: targetChatId, mission } = pendingPlan;
+    const { task, attachments, autoDecision, chatId: targetChatId } = pendingPlan;
     setPendingPlan(null);
-    if (mission) {
-      const approvedMission = { ...mission, status: "running" as const };
-      await updateMission(user!.uid, mission.id, { status: "running" });
-      await launchMission(approvedMission, targetChatId);
-    } else {
-      await executeTask(task, attachments, targetChatId, autoDecision);
-    }
+    await executeTask(task, attachments, targetChatId, autoDecision);
     setPlanBusy(false);
   }
 
@@ -1344,11 +1355,20 @@ export default function HomePage() {
                 />
               ))}
 
-              {activeMission && activeMission.chatId === chatId && (
-                <MissionCard mission={activeMission} onCancel={handleCancelMission} />
+              {pendingMission && pendingMission.chatId === chatId && (
+                <PlanApprovalCard
+                  steps={pendingMission.subtasks.map((s) => `${s.workerType}: ${s.description}`)}
+                  onApprove={handleApproveMission}
+                  onCancel={handleCancelMissionPlan}
+                  busy={missionPlanBusy}
+                />
               )}
 
-              {pendingPlan && (
+              {activeMission && activeMission.chatId === chatId && (
+                <MissionCard mission={activeMission} onCancel={pendingMission ? undefined : handleCancelMission} />
+              )}
+
+              {pendingPlan && ( 
                 <PlanApprovalCard
                   steps={pendingPlan.steps}
                   onApprove={handleApprovePlan}
