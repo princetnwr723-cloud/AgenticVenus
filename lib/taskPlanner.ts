@@ -20,7 +20,7 @@ export async function generateTaskPlan(
   toolsSummary: string,
   model?: string
 ): Promise<TaskPlan | null> {
-  const prompt = `You're about to work on this task using real tools: "${task}"\n\nWhat you'll use: ${toolsSummary}\n\nWrite a short plan — 3 to 6 concrete steps — for how you'll approach it. Reply with ONLY raw JSON: {"steps": ["step 1", "step 2", ...]}`;
+  const prompt = `You're about to work on this task using real tools: "${task}"\n\nWhat you'll use: ${toolsSummary}\n\nIf the user requested multiple objectives in one prompt, preserve ALL of them and order the dependencies correctly. Write a short plan — 3 to 8 concrete steps — for how you'll approach the complete request. Do not silently drop a subtask. Reply with ONLY raw JSON: {"steps": ["step 1", "step 2", ...]}`;
   try {
     const { text } = await sendChatMessage({ providerId, apiKey, model, messages: [{ role: "user", content: prompt }] });
     const parsed = JSON.parse(extractJson(text));
