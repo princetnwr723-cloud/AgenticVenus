@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import type { CodeFile } from "@/lib/codeExtract";
 import type { Attachment } from "@/lib/chatClient";
 import { buildPreviewHtml, listHtmlPages } from "@/lib/preview";
 import { highlightCode } from "@/lib/syntaxHighlight";
 import { publishProject } from "@/lib/publishClient";
 import VerificationBadge from "@/components/VerificationBadge";
-import { writeAgentFile } from "@/lib/workspaceClient";
+import { writeAgentFile, ensureAgentWorkspace, runAgentSessionCommand, getAgentPreview } from "@/lib/workspaceClient";
 
 type Props = {
   open: boolean;
@@ -15,6 +15,7 @@ type Props = {
   files: CodeFile[];
   assets?: Attachment[];
   openFileId?: string | null;
+  livePreviewUrl?: string | null;
 };
 
 function groupByFolder(files: CodeFile[]): Map<string, CodeFile[]> {
@@ -40,7 +41,7 @@ function triggerDownload(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export default function CodespacePanel({ open, onClose, files, assets = [], openFileId = null }: Props) {
+export default function CodespacePanel({ open, onClose, files, assets = [], openFileId = null, livePreviewUrl = null }: Props) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"code" | "preview">("code");
   const [copied, setCopied] = useState(false);
@@ -57,6 +58,17 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
   const [publishVerified, setPublishVerified] = useState<boolean | null>(null);
   const [publishReason, setPublishReason] = useState<string>("");
   const [publishError, setPublishError] = useState<string | null>(null);
+  const [terminalLines, setTerminalLines] = useState<string[]>([]);
+  const [terminalCommand, setTerminalCommand] = useState("");
+  const [terminalBusy, setTerminalBusy] = useState(false);
+  const [workspaceReady, setWorkspaceReady] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(true);
+  const [livePort, setLivePort] = useState("3000");
+  const [livePreviewMessage, setLivePreviewMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (livePreviewUrl) setViewMode("preview");
+  }, [livePreviewUrl]);
 
   useEffect(() => {
     if (open && openFileId) {
@@ -64,6 +76,11 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
       setViewMode("code");
     }
   }, [open, openFileId]);
+
+  useEffect(() => {
+    if (!open) return;
+    ensureAgentWorkspace().then(() => setWorkspaceReady(true)).catch((e) => setTerminalLines((x) => [...x, `✕ Workspace: ${e instanceof Error ? e.message : String(e)}`]));
+  }, [open]);
 
   useEffect(() => {
     const current = files.find((f) => f.id === activeId) ?? files[files.length - 1];
@@ -126,6 +143,33 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
     }
   }
 
+  async function runTerminal(e?: FormEvent) {
+    e?.preventDefault();
+    const cmd = terminalCommand.trim();
+    if (!cmd || terminalBusy) return;
+    setTerminalCommand("");
+    setTerminalBusy(true);
+    setTerminalLines((x) => [...x, `$ ${cmd}`]);
+    try {
+      const result = await runAgentSessionCommand(cmd, "agenticvenus-terminal", false);
+      const output = result.output || result.stdout || result.stderr || "";
+      setTerminalLines((x) => [...x, output || `(exit ${result.exitCode ?? 0})`, `exit ${result.exitCode ?? 0}`]);
+    } catch (e2) {
+      setTerminalLines((x) => [...x, `✕ ${e2 instanceof Error ? e2.message : String(e2)}`]);
+    } finally {
+      setTerminalBusy(false);
+    }
+  }
+
+  async function openLivePreview() {
+    try {
+      const result = await getAgentPreview(Number(livePort) || 3000);
+      setLivePreviewMessage(result.url);
+    } catch (e) {
+      setTerminalLines((x) => [...x, `✕ Preview: ${e instanceof Error ? e.message : String(e)}`]);
+    }
+  }
+
   async function handleDownloadAll() {
     if (files.length === 0) return;
     setZipping(true);
@@ -152,7 +196,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
             <h2 className="text-sm font-medium">Codespace — Developer Agent</h2>
           </div>
           <div className="flex items-center gap-2">
-            {previewHtml && files.length > 0 && (
+            {(previewHtml && files.length > 0 || livePreviewUrl) && (
               <div className="flex overflow-hidden rounded-md border border-white/15 text-xs">
                 <button onClick={() => setViewMode("code")} className={`px-3 py-1.5 transition-colors ${viewMode === "code" ? "bg-white/15 text-cream" : "text-cream/50 hover:bg-white/5"}`}>Code</button>
                 <button onClick={() => setViewMode("preview")} className={`px-3 py-1.5 transition-colors ${viewMode === "preview" ? "bg-white/15 text-cream" : "text-cream/50 hover:bg-white/5"}`}>Preview</button>
@@ -195,7 +239,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
           <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-cream/40">
             The Developer Agent hasn&apos;t written any code in this chat yet. Ask it to build something and files will show up here.
           </div>
-        ) : viewMode === "preview" && previewHtml ? (
+        ) : viewMode === "preview" && (livePreviewUrl || livePreviewMessage || previewHtml) ? (
           <div className="flex h-full w-full flex-1 flex-col">
             {htmlPages.length > 1 && (
               <div className="flex items-center gap-2 border-b border-white/10 bg-[#1e1c19] px-4 py-2">
@@ -242,6 +286,28 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
             </div>
           </div>
         )}
+
+        <div className={`${terminalOpen ? "h-56" : "h-10"} shrink-0 border-t border-white/10 bg-[#0d0d0c]`}>
+          <div className="flex h-10 items-center gap-2 border-b border-white/10 px-4">
+            <button onClick={() => setTerminalOpen((v) => !v)} className="text-xs font-medium text-cream/70">⌄ Terminal</button>
+            <span className={`h-1.5 w-1.5 rounded-full ${workspaceReady ? "bg-moss" : "bg-clay"}`} />
+            <span className="text-[10px] text-cream/30">{workspaceReady ? "Persistent workspace" : "Connecting…"}</span>
+            <div className="ml-auto flex items-center gap-1">
+              <input value={livePort} onChange={(e) => setLivePort(e.target.value)} className="w-14 rounded border border-white/10 bg-white/5 px-1.5 py-1 text-[10px] text-cream outline-none" />
+              <button onClick={openLivePreview} className="rounded border border-white/10 px-2 py-1 text-[10px] text-cream/60 hover:bg-white/10 hover:text-cream">Open preview</button>
+            </div>
+          </div>
+          {terminalOpen && <div className="flex h-[calc(100%-2.5rem)] flex-col">
+            <div className="flex-1 overflow-auto p-3 font-mono text-[11px] leading-relaxed text-cream/70">
+              {terminalLines.length ? terminalLines.map((line, i) => <div key={i} className="whitespace-pre-wrap break-words">{line}</div>) : <div className="text-cream/25">Terminal ready. Try npm install, npm run build, npm run dev, git status…</div>}
+            </div>
+            <form onSubmit={runTerminal} className="flex border-t border-white/10 px-3 py-2">
+              <span className="mr-2 font-mono text-xs text-moss">$</span>
+              <input value={terminalCommand} onChange={(e) => setTerminalCommand(e.target.value)} placeholder="Run a command…" className="min-w-0 flex-1 bg-transparent font-mono text-xs text-cream outline-none placeholder:text-cream/25" />
+              <button disabled={terminalBusy} className="ml-2 rounded bg-white/10 px-3 py-1 text-[11px] text-cream disabled:opacity-40">{terminalBusy ? "Running" : "Run"}</button>
+            </form>
+          </div>}
+        </div>
 
         {publishedUrl && (
           <div className="flex items-center gap-2 border-t border-white/10 bg-moss/10 px-5 py-2 text-xs text-moss">
