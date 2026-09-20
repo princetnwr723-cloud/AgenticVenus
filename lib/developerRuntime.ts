@@ -2,7 +2,7 @@
 
 import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
 import { extractCodeFiles } from "@/lib/codeExtract";
-import { ensureAgentWorkspace, getAgentPreview, runAgentCommand, runAgentSessionCommand, writeAgentFile } from "@/lib/workspaceClient";
+import { ensureAgentWorkspace, getAgentPreview, listAgentFiles, runAgentCommand, runAgentSessionCommand, writeAgentFile } from "@/lib/workspaceClient";
 
 export type DeveloperRunResult = {
   changedFiles: string[];
@@ -28,8 +28,10 @@ export async function runDeveloperWorkspace(
   const step = (s: string) => { steps.push(s); onStep?.(s); };
   const workspace = await ensureAgentWorkspace();
   step(`Workspace ready: ${workspace.sandboxId.slice(0, 10)}…`);
+  const existingFiles = await listAgentFiles(true).catch(() => []);
+  const existingContext = existingFiles.slice(0, 20).map((f) => `FILE: ${f.path}\n\`\`\`\n${(f.content || "").slice(0, 12000)}\n\`\`\``).join("\n\n");
 
-  const prompt = `You are the Developer Agent working inside a real persistent cloud workspace. Build/fix the user's requested project for real.\n\nUSER TASK:\n${task}\n\nRECENT CONTEXT:\n${history.slice(-8).map((m) => `${m.role}: ${m.content}`).join("\n")}\n\nReturn ONLY the complete files that you need to create or change, using this exact format for every file:\n\nFILE: path/to/file.ext\n	description optional\n\`\`\`language\nfull file contents\n\`\`\`\n\nDo not return a vague plan. Write production-ready code. Keep existing project structure when possible.`;
+  const prompt = `You are the Developer Agent working inside a real persistent cloud workspace. Build/fix the user's requested project for real.\n\nUSER TASK:\n${task}\n\nRECENT CONTEXT:\n${history.slice(-8).map((m) => `${m.role}: ${m.content}`).join("\n")}\n\nEXISTING WORKSPACE FILES (edit these instead of recreating the project blindly):\n${existingContext || "(empty workspace)"}\n\nReturn ONLY the complete files that you need to create or change, using this exact format for every file:\n\nFILE: path/to/file.ext\n	description optional\n\`\`\`language\nfull file contents\n\`\`\`\n\nDo not return a vague plan. Write production-ready code. Keep existing project structure when possible.`;
 
   const response = await sendChatMessage({ providerId, apiKey, model, messages: [{ role: "user", content: prompt }] });
   const files = extractCodeFiles([{ role: "assistant", content: response.text || "" }]);
@@ -40,7 +42,7 @@ export async function runDeveloperWorkspace(
     step(`Wrote ${file.filename}`);
   }
 
-  const packageFile = files.find((f) => f.filename === "package.json" || f.filename.endsWith("/package.json"));
+  const packageFile = files.find((f) => f.filename === "package.json" || f.filename.endsWith("/package.json")) || existingFiles.find((f) => f.path === "package.json");
   let buildOutput = "";
   let buildOk = true;
   if (packageFile) {
@@ -69,8 +71,10 @@ export async function runDeveloperWorkspace(
     }
 
     if (buildOk) {
-      const port = /vite/i.test(packageFile.code) ? 5173 : 3000;
+      const packageText = typeof packageFile === "object" && "code" in packageFile ? packageFile.code : (packageFile as any)?.content || "";
+      const port = /vite/i.test(packageText) ? 5173 : 3000;
       step(`Starting dev server on ${port}…`);
+      await runAgentSessionCommand("pkill -f 'next dev|vite' || true", "agenticvenus-dev", false).catch(() => undefined);
       await runAgentSessionCommand(`npm run dev -- --hostname 0.0.0.0 --port ${port}`, "agenticvenus-dev", true);
       await new Promise((r) => setTimeout(r, 1800));
       try {
