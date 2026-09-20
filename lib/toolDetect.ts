@@ -7,6 +7,7 @@
 
 import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
 import { PLUGIN_TOOLS } from "@/lib/plugins";
+import { findToolIdForTask } from "@/lib/toolRegistry";
 
 export type ToolNeed = {
   toolId: string | null;
@@ -35,6 +36,18 @@ export async function detectToolNeed(
   model?: string
 ): Promise<ToolNeed | null> {
   const catalog = PLUGIN_TOOLS.map((t) => `${t.id}: ${t.name} — ${t.description}`).join("\n");
+  // Deterministic fast path for high-confidence service requests. This prevents
+  // a model classification miss from telling the user a connected account is missing.
+  const deterministicTool = findToolIdForTask(messages[messages.length - 1]?.content || "", connectedToolIds);
+  if (deterministicTool) {
+    const known = PLUGIN_TOOLS.some((t) => t.id === deterministicTool);
+    return {
+      toolId: known ? deterministicTool : null,
+      toolName: PLUGIN_TOOLS.find((t) => t.id === deterministicTool)?.name || deterministicTool,
+      known,
+      connected: known ? connectedToolIds.includes(deterministicTool) : false,
+    };
+  }
 
   const prompt = `Decide if the LATEST message in this conversation would require using an external tool/account (like sending an email, checking a calendar, posting a message, looking at a repo, etc.) rather than just knowledge or conversation. Use the full conversation for context — a short follow-up like "send it" or "now do it" refers back to what was discussed earlier.
 
