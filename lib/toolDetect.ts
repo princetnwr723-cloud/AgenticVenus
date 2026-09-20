@@ -1,25 +1,75 @@
-// lib/toolDetect.ts
-// Before answering, checks whether the CONVERSATION (not just the latest
-// message) needs an external tool. Using the full recent history here is
-// what fixes multi-turn commands like "draft it" → "now send it" — the
-// old version only looked at the single latest message, so a follow-up
-// like "send it" with no other detail couldn't be matched to anything.
+// lib/mcpOrchestrator.ts
+// Client-side glue for MCP: probing a URL to know what auth it needs,
+// kicking off the OAuth "Continue to X" flow, and — once a server is
+// connected — using the AI itself to decide whether a task needs one of
+// its tools, then actually calling it.
 
+import { auth } from "@/lib/firebase";
 import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
-import { PLUGIN_TOOLS } from "@/lib/plugins";
-import { findToolIdForTask } from "@/lib/toolRegistry";
+import type { MCPServer } from "@/lib/mcp";
+import type { MCPToolInfo } from "@/lib/mcpClient";
 
-export type ToolNeed = {
-  toolId: string | null;
-  toolName: string;
-  known: boolean;
-  connected: boolean;
-};
-
-function extractJson(text: string): string {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  return (fenced ? fenced[1] : text).trim();
+async function authedHeaders() {
+  const idToken = await auth.currentUser?.getIdToken();
+  if (!idToken) throw new Error("Not signed in.");
+  return { "content-type": "application/json", authorization: `Bearer ${idToken}` };
 }
+
+export type ProbeResult =
+  | { authType: "none" }
+  | { authType: "oauth" }
+  | { authType: "apikey" };
+
+export async function probeMcpServer(serverUrl: string): Promise<ProbeResult> {
+  const res = await fetch("/api/mcp/probe", {
+    method: "POST",
+    headers: await authedHeaders(),
+    body: JSON.stringify({ serverUrl }),
+  });
+  const data = await res.json();
+  return { authType: data.authType || "apikey" };
+}
+
+/** Starts the real OAuth login for a server and returns the URL to send
+ * the browser to — this is the "Continue to X" button's action. */
+export async function startMcpOAuth(serverName: string, serverUrl: string): Promise<string> {
+  const res = await fetch("/api/mcp/oauth/start", {
+    method: "POST",
+    headers: await authedHeaders(),
+    body: JSON.stringify({ serverName, serverUrl }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || "Failed to start OAuth login.");
+  return data.authUrl as string;
+}
+
+export async function discoverMcpTools(serverUrl: string, apiKeyHeader?: string): Promise<MCPToolInfo[]> {
+  const res = await fetch("/api/mcp/tools", {
+    method: "POST",
+    headers: await authedHeaders(),
+    body: JSON.stringify({ serverUrl, apiKeyHeader }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || "Failed to reach the MCP server.");
+  return data.tools as MCPToolInfo[];
+}
+
+export async function callMcpTool(serverId: string, toolName: string, args: Record<string, any>): Promise<string> {
+  const res = await fetch("/api/mcp/call", {
+    method: "POST",
+    headers: await authedHeaders(),
+    body: JSON.stringify({ serverId, toolName, arguments: args }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || "The MCP tool call failed.");
+  return data.result as string;
+}
+
+export type PlannedToolCall = {
+  serverId: string;
+  toolName: string;
+  arguments: Record<string, any>;
+};
 
 function transcript(messages: ChatMessage[], turns = 8): string {
   return messages
@@ -28,39 +78,36 @@ function transcript(messages: ChatMessage[], turns = 8): string {
     .join("\n");
 }
 
-export async function detectToolNeed(
+function extractJson(text: string): string {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  return (fenced ? fenced[1] : text).trim();
+}
+
+/** Asks the connected AI whether the CONVERSATION (not just the latest
+ * message) should trigger one of the user's MCP tools, and with what
+ * arguments. Returns null if no tool fits. */
+export async function decideMcpToolCall(
   providerId: string,
   apiKey: string,
   messages: ChatMessage[],
-  connectedToolIds: string[],
+  servers: MCPServer[],
   model?: string
-): Promise<ToolNeed | null> {
-  const catalog = PLUGIN_TOOLS.map((t) => `${t.id}: ${t.name} — ${t.description}`).join("\n");
-  // Deterministic fast path for high-confidence service requests. This prevents
-  // a model classification miss from telling the user a connected account is missing.
-  const deterministicTool = findToolIdForTask(messages[messages.length - 1]?.content || "", connectedToolIds);
-  if (deterministicTool) {
-    const known = PLUGIN_TOOLS.some((t) => t.id === deterministicTool);
-    return {
-      toolId: known ? deterministicTool : null,
-      toolName: PLUGIN_TOOLS.find((t) => t.id === deterministicTool)?.name || deterministicTool,
-      known,
-      connected: known ? connectedToolIds.includes(deterministicTool) : false,
-    };
-  }
+): Promise<PlannedToolCall | null> {
+  const withTools = servers.filter((s) => s.tools && s.tools.length > 0);
+  if (withTools.length === 0) return null;
 
-  const prompt = `Decide if the LATEST message in this conversation would require using an external tool/account (like sending an email, checking a calendar, posting a message, looking at a repo, etc.) rather than just knowledge or conversation. Use the full conversation for context — a short follow-up like "send it" or "now do it" refers back to what was discussed earlier.
+  const catalog = withTools
+    .flatMap((s) =>
+      (s.tools || []).map(
+        (t) =>
+          `serverId: ${s.id} | server: ${s.name} | tool: ${t.name} | description: ${t.description || "(none)"} | inputSchema: ${JSON.stringify(
+            t.inputSchema || {}
+          )}`
+      )
+    )
+    .join("\n");
 
-Conversation so far:
-${transcript(messages)}
-
-Known tool catalog (match against these ids if it fits one):
-${catalog}
-
-Reply with ONLY raw JSON, no other text:
-{"needsTool": boolean, "toolId": "matching id from the catalog, or null if none fits", "toolName": "human name of the tool needed (even if not in the catalog)"}
-
-If no external tool is needed, reply {"needsTool": false, "toolId": null, "toolName": ""}.`;
+  const prompt = `You have access to these MCP tools:\n${catalog}\n\nConversation so far (use this for context — a short follow-up like "do it" refers back to details discussed earlier):\n${transcript(messages)}\n\nDecide if one of these tools should be called right now, based on the latest USER request plus any REAL TOOL RESULTS already recorded. Reply with ONLY raw JSON, no other text:\n{"useTool": boolean, "serverId": "matching serverId or null", "toolName": "matching tool name or null", "arguments": {"...": "arguments matching that tool's inputSchema, inferred from the whole conversation"}}\n\nIf all requested work is already completed by the recorded real tool results, reply {"useTool": false, "serverId": null, "toolName": null, "arguments": {}}.`;
 
   try {
     const { text } = await sendChatMessage({
@@ -70,15 +117,12 @@ If no external tool is needed, reply {"needsTool": false, "toolId": null, "toolN
       model,
     });
     const parsed = JSON.parse(extractJson(text));
-    if (!parsed?.needsTool) return null;
+    if (!parsed?.useTool || !parsed.serverId || !parsed.toolName) return null;
 
-    const known = !!parsed.toolId && PLUGIN_TOOLS.some((t) => t.id === parsed.toolId);
-    return {
-      toolId: known ? parsed.toolId : null,
-      toolName: parsed.toolName || parsed.toolId || "this tool",
-      known,
-      connected: known ? connectedToolIds.includes(parsed.toolId) : false,
-    };
+    const server = servers.find((s) => s.id === parsed.serverId);
+    if (!server) return null;
+
+    return { serverId: server.id, toolName: parsed.toolName, arguments: parsed.arguments || {} };
   } catch {
     return null;
   }
