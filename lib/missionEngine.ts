@@ -11,6 +11,8 @@ import { updateMission, type Mission, type MissionSubtask, type WorkerType } fro
 import { verifyTaskResult } from "@/lib/verification";
 import { withRecovery } from "@/lib/recoveryEngine";
 import { getAgentById } from "@/lib/agents";
+import { extractCodeFiles } from "@/lib/codeExtract";
+import { ensureAgentWorkspace, getAgentPreview, runAgentCommand, runAgentSessionCommand, writeAgentFile } from "@/lib/workspaceClient";
 
 const MAX_CONCURRENCY = 3;
 const MAX_STEP_ATTEMPTS = 3;
@@ -36,7 +38,8 @@ function concreteEnough(output: string): boolean {
 async function runOneSubtask(
   providerId: string, apiKey: string, objective: string, subtask: MissionSubtask,
   priorResults: string[], hasBrowser: boolean, hasComputer: boolean, model: string | undefined,
-  onStep: (s: string) => void
+  onStep: (s: string) => void,
+  onPluginAction?: (task: string) => Promise<string | null>
 ): Promise<string> {
   const context = priorResults.length
     ? `Useful outputs from completed workers:\n${priorResults.map((r, i) => `--- Result ${i + 1} ---\n${r.slice(0, 6000)}`).join("\n")}\n\n`
@@ -124,6 +127,84 @@ Return useful work and evidence. Do not claim an external action happened unless
 
   if (!text?.trim() || !concreteEnough(text)) throw new Error("Worker returned no concrete result. Retry with an execution-first prompt.");
   if (isCoder && !looksLikeRealCode(text)) throw new Error("Coder returned no concrete code/artifact. Retry with an implementation-first prompt.");
+
+  // Developer Agent upgrade: when Daytona is available, turn the model output
+  // into real workspace files, run the project, and (when a browser is
+  // connected) inspect the live preview. This makes coding missions an
+  // execution loop instead of a code-generation-only loop.
+  if (isCoder && hasComputer) {
+    try {
+      await ensureAgentWorkspace();
+      const files = extractCodeFiles([{ role: "assistant", content: text }]);
+      for (const file of files) {
+        await writeAgentFile(file.filename, file.code);
+      }
+      if (files.length) onStep(`💻 [${subtask.id}] Wrote ${files.length} real file(s) to the persistent workspace.`);
+
+      const packageFile = files.find((f) => f.filename === "package.json" || f.filename.endsWith("/package.json"));
+      if (packageFile) {
+        onStep(`🧪 [${subtask.id}] Installing dependencies and running the production build...`);
+        const build = await runAgentCommand("npm install --no-audit --no-fund && npm run build", "workspace", 240);
+        if (build.exitCode !== 0) {
+          onStep(`⚠️ [${subtask.id}] Build failed. Sending the real error back to the coder...`);
+          const repair = await sendChatMessage({
+            providerId, apiKey, model,
+            messages: [{ role: "user", content: `${prompt}
+
+REAL WORKSPACE BUILD FAILURE:
+${build.output.slice(-12000)}
+
+Fix the project. Return the complete updated files that need changing.` }],
+            systemPrompt: getAgentById("developer").systemPrompt,
+          });
+          if (repair.text?.trim()) {
+            const repairedFiles = extractCodeFiles([{ role: "assistant", content: repair.text }]);
+            for (const file of repairedFiles) await writeAgentFile(file.filename, file.code);
+            const retry = await runAgentCommand("npm run build", "workspace", 240);
+            if (retry.exitCode !== 0) throw new Error(`WORKSPACE_BUILD_FAILED: ${retry.output.slice(-6000)}`);
+          } else {
+            throw new Error(`WORKSPACE_BUILD_FAILED: ${build.output.slice(-6000)}`);
+          }
+        }
+
+        // Keep the dev server in the persistent workspace so the same machine
+        // can be resumed later. The preview port follows common Next/Vite
+        // defaults; the user can also open any port from Codespace.
+        const isVite = /vite/i.test(packageFile.code);
+        const port = isVite ? 5173 : 3000;
+        await runAgentSessionCommand(`npm run dev -- --hostname 0.0.0.0 --port ${port}`, "agenticvenus-dev", true);
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        const preview = await getAgentPreview(port);
+        onStep(`👀 [${subtask.id}] Live preview ready on port ${port}.`);
+
+        if (hasBrowser && preview.url) {
+          let inspection = "Preview inspection unavailable.";
+          let previewSession: { sessionId: string } | null = null;
+          try {
+            previewSession = await startBrowserSession();
+            inspection = await runBrowserTask(
+              providerId,
+              apiKey,
+              previewSession.sessionId,
+              `Open this live AgenticVenus workspace preview and inspect it carefully on desktop and mobile-sized view. Check for broken layout, missing assets, console-visible failures, empty sections, obvious UI issues, and whether the requested objective is actually present. Do not change anything. Return a concise list of concrete issues or say that no obvious issues were found. Preview URL: ${preview.url}`,
+              model,
+              (step) => onStep(`[${subtask.id}] ${step}`)
+            );
+          } catch (err) {
+            inspection = `Preview inspection unavailable: ${err instanceof Error ? err.message : String(err)}`;
+          } finally {
+            if (previewSession?.sessionId) await stopBrowserSession(previewSession.sessionId).catch(() => undefined);
+          }
+          onStep(`🔍 [${subtask.id}] Preview inspection: ${inspection.slice(0, 1200)}`);
+        }
+      }
+    } catch (workspaceError) {
+      // Workspace enhancement must never turn a working text/code mission into
+      // a false failure when the optional cloud runtime is unavailable.
+      onStep(`ℹ️ [${subtask.id}] Cloud workspace step skipped: ${workspaceError instanceof Error ? workspaceError.message : String(workspaceError)}`);
+    }
+  }
+
   return text;
 }
 
