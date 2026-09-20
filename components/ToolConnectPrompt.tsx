@@ -6,7 +6,7 @@
 // plugin catalog, offers to open Plugins to connect it. If it's not a
 // known plugin, points the user to MCP Tools instead.
 
-import type { ToolNeed } from "@/lib/toolDetect";
+import type { ToolNeed } from "@/lib/plugins";
 
 type Props = {
   need: ToolNeed;
