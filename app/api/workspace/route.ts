@@ -7,6 +7,7 @@ import {
   workspaceWriteFile,
   workspaceReadFile,
   workspacePreview,
+  workspaceListFiles,
   workspaceDelete,
 } from "@/lib/workspaceRuntime";
 
@@ -30,6 +31,7 @@ export async function POST(req: NextRequest) {
     if (action === "write") return NextResponse.json({ ok: true, result: await workspaceWriteFile(uid, body.path, body.content) });
     if (action === "read") return NextResponse.json({ ok: true, result: await workspaceReadFile(uid, body.path) });
     if (action === "preview") return NextResponse.json({ ok: true, result: await workspacePreview(uid, Number(body.port || 3000)) });
+    if (action === "list") return NextResponse.json({ ok: true, ...(await workspaceListFiles(uid, !!body.includeContent)) });
     if (action === "delete") { await workspaceDelete(uid); return NextResponse.json({ ok: true }); }
 
     return NextResponse.json({ error: "Unknown workspace action." }, { status: 400 });
