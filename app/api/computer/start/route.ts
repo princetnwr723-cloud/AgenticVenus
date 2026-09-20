@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No Daytona API key — add yours in Settings → Integrations." }, { status: 400 });
     }
 
-    const result = await startComputer(apiKey);
+    const result = await startComputer(apiKey, decoded.uid);
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     console.error("[api/computer/start]", err);
