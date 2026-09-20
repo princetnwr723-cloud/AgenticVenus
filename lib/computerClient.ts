@@ -9,7 +9,7 @@ import { auth } from "@/lib/firebase";
 import { sendChatMessage } from "@/lib/chatClient";
 import type { ComputerAction } from "@/lib/computerUse";
 
-const MAX_STEPS = 25;
+const MAX_STEPS = 60;
 
 async function authedHeaders() {
   const idToken = await auth.currentUser?.getIdToken();
