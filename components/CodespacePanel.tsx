@@ -7,7 +7,7 @@ import { buildPreviewHtml, listHtmlPages } from "@/lib/preview";
 import { highlightCode } from "@/lib/syntaxHighlight";
 import { publishProject } from "@/lib/publishClient";
 import VerificationBadge from "@/components/VerificationBadge";
-import { writeAgentFile, ensureAgentWorkspace, runAgentSessionCommand, getAgentPreview } from "@/lib/workspaceClient";
+import { writeAgentFile, ensureAgentWorkspace, listAgentFiles, runAgentSessionCommand, getAgentPreview } from "@/lib/workspaceClient";
 
 type Props = {
   open: boolean;
@@ -65,6 +65,8 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
   const [terminalOpen, setTerminalOpen] = useState(true);
   const [livePort, setLivePort] = useState("3000");
   const [livePreviewMessage, setLivePreviewMessage] = useState<string | null>(null);
+  const [workspaceFiles, setWorkspaceFiles] = useState<CodeFile[]>([]);
+  const [workspaceSyncing, setWorkspaceSyncing] = useState(false);
 
   useEffect(() => {
     if (livePreviewUrl) setViewMode("preview");
@@ -77,23 +79,45 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
     }
   }, [open, openFileId]);
 
-  useEffect(() => {
+  async function syncWorkspace() {
     if (!open) return;
-    ensureAgentWorkspace().then(() => setWorkspaceReady(true)).catch((e) => setTerminalLines((x) => [...x, `✕ Workspace: ${e instanceof Error ? e.message : String(e)}`]));
-  }, [open]);
+    try {
+      setWorkspaceSyncing(true);
+      await ensureAgentWorkspace();
+      const remote = await listAgentFiles(true);
+      const mapped: CodeFile[] = remote.map((f) => ({ id: `workspace:${f.path}`, filename: f.path, code: f.content || "" }));
+      setWorkspaceFiles(mapped);
+      setWorkspaceReady(true);
+      if (!activeId && mapped.length) setActiveId(mapped[mapped.length - 1].id);
+    } catch (e) {
+      setTerminalLines((x) => [...x, `✕ Workspace sync: ${e instanceof Error ? e.message : String(e)}`]);
+    } finally {
+      setWorkspaceSyncing(false);
+    }
+  }
 
   useEffect(() => {
-    const current = files.find((f) => f.id === activeId) ?? files[files.length - 1];
+    if (!open) return;
+    syncWorkspace();
+    const timer = window.setInterval(() => syncWorkspace(), 2000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const displayFiles = workspaceFiles.length > 0 ? workspaceFiles : files;
+
+  useEffect(() => {
+    const current = displayFiles.find((f) => f.id === activeId) ?? displayFiles[displayFiles.length - 1];
     setEditedCode(current?.code || "");
     setSaveMessage(null);
-  }, [activeId, files]);
+  }, [activeId, workspaceFiles, files]);
 
   if (!open) return null;
 
-  const active = files.find((f) => f.id === activeId) ?? files[files.length - 1];
-  const htmlPages = listHtmlPages(files);
-  const previewHtml = buildPreviewHtml(files, assets, previewPage || undefined);
-  const grouped = groupByFolder(files);
+  const active = displayFiles.find((f) => f.id === activeId) ?? displayFiles[displayFiles.length - 1];
+  const htmlPages = listHtmlPages(displayFiles);
+  const previewHtml = buildPreviewHtml(displayFiles, assets, previewPage || undefined);
+  const grouped = groupByFolder(displayFiles);
 
   async function handleCopy() {
     if (!active) return;
@@ -105,14 +129,14 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
   }
 
   async function handlePublish(target: "vercel" | "netlify") {
-    if (files.length === 0) return;
+    if (displayFiles.length === 0) return;
     setPublishMenuOpen(false);
     setPublishing(true);
     setPublishError(null);
     setPublishedUrl(null);
     setPublishVerified(null);
     try {
-      const { url, verified, verificationReason } = await publishProject(target, files);
+      const { url, verified, verificationReason } = await publishProject(target, displayFiles);
       setPublishedUrl(url);
       setPublishVerified(verified);
       setPublishReason(verificationReason);
@@ -165,18 +189,19 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
     try {
       const result = await getAgentPreview(Number(livePort) || 3000);
       setLivePreviewMessage(result.url);
+      setViewMode("preview");
     } catch (e) {
       setTerminalLines((x) => [...x, `✕ Preview: ${e instanceof Error ? e.message : String(e)}`]);
     }
   }
 
   async function handleDownloadAll() {
-    if (files.length === 0) return;
+    if (displayFiles.length === 0) return;
     setZipping(true);
     try {
       const JSZip = (await import("jszip")).default;
       const zip = new JSZip();
-      for (const f of files) zip.file(f.filename, f.code);
+      for (const f of displayFiles) zip.file(f.filename, f.code);
       const blob = await zip.generateAsync({ type: "blob" });
       triggerDownload(blob, "agenticvenus-project.zip");
     } finally {
@@ -196,13 +221,13 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
             <h2 className="text-sm font-medium">Codespace — Developer Agent</h2>
           </div>
           <div className="flex items-center gap-2">
-            {(previewHtml && files.length > 0 || livePreviewUrl) && (
+            {(previewHtml && displayFiles.length > 0 || livePreviewUrl) && (
               <div className="flex overflow-hidden rounded-md border border-white/15 text-xs">
                 <button onClick={() => setViewMode("code")} className={`px-3 py-1.5 transition-colors ${viewMode === "code" ? "bg-white/15 text-cream" : "text-cream/50 hover:bg-white/5"}`}>Code</button>
                 <button onClick={() => setViewMode("preview")} className={`px-3 py-1.5 transition-colors ${viewMode === "preview" ? "bg-white/15 text-cream" : "text-cream/50 hover:bg-white/5"}`}>Preview</button>
               </div>
             )}
-            {files.length > 0 && (
+            {displayFiles.length > 0 && (
               <div className="relative">
                 <button
                   onClick={() => setPublishMenuOpen((o) => !o)}
@@ -219,7 +244,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
                 )}
               </div>
             )}
-            {files.length > 0 && (
+            {displayFiles.length > 0 && (
               <button onClick={handleDownloadAll} disabled={zipping} className="focus-ring rounded-md border border-white/15 px-2.5 py-1 text-xs text-cream/70 transition-colors hover:bg-white/10 hover:text-cream disabled:opacity-50">
                 {zipping ? "Zipping..." : "Download all"}
               </button>
@@ -235,7 +260,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
           </div>
         </div>
 
-        {files.length === 0 ? (
+        {displayFiles.length === 0 ? (
           <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-cream/40">
             The Developer Agent hasn&apos;t written any code in this chat yet. Ask it to build something and files will show up here.
           </div>
@@ -250,24 +275,12 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
                 <span className="text-xs text-cream/30">Links between pages won't navigate here — switch pages with this dropdown instead.</span>
               </div>
             )}
-            {livePreviewUrl ? (
-              <iframe
-                title="Codespace live preview"
-                src={livePreviewUrl}
-                sandbox="allow-scripts allow-forms allow-same-origin"
-                className="h-full w-full flex-1 border-0 bg-white"
-              />
+            {(livePreviewUrl || livePreviewMessage) ? (
+              <iframe title="Codespace live preview" src={livePreviewUrl || livePreviewMessage || undefined} sandbox="allow-scripts allow-forms allow-same-origin" className="h-full w-full flex-1 border-0 bg-white" />
             ) : previewHtml ? (
-              <iframe
-                title="Codespace preview"
-                srcDoc={previewHtml}
-                sandbox="allow-scripts allow-modals allow-forms allow-same-origin"
-                className="h-full w-full flex-1 border-0 bg-white"
-              />
+              <iframe title="Codespace static preview" srcDoc={previewHtml || undefined} sandbox="allow-scripts allow-modals allow-forms allow-same-origin" className="h-full w-full flex-1 border-0 bg-white" />
             ) : (
-              <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-cream/40">
-                {livePreviewMessage || "No preview is available yet."}
-              </div>
+              <div className="flex flex-1 items-center justify-center text-sm text-cream/40">{livePreviewMessage || "Preview is not ready yet."}</div>
             )}
           </div>
         ) : (
@@ -277,7 +290,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
                 <div key={folder || "__root"}>
                   {folder && <p className="px-4 pb-1 pt-3 text-[10px] font-medium uppercase tracking-wide text-cream/30">{folder}</p>}
                   {folderFiles.map((f) => (
-                    <button key={f.id} onClick={() => setActiveId(f.id)} className={`block w-full truncate px-4 py-2 text-left text-xs transition-colors ${(active?.id ?? files[files.length - 1].id) === f.id ? "bg-white/10 text-cream" : "text-cream/50 hover:bg-white/5 hover:text-cream/80"}`}>
+                    <button key={f.id} onClick={() => setActiveId(f.id)} className={`block w-full truncate px-4 py-2 text-left text-xs transition-colors ${(active?.id ?? displayFiles[displayFiles.length - 1]?.id) === f.id ? "bg-white/10 text-cream" : "text-cream/50 hover:bg-white/5 hover:text-cream/80"}`}>
                       {f.filename.split("/").pop()}
                     </button>
                   ))}
@@ -309,7 +322,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
           <div className="flex h-10 items-center gap-2 border-b border-white/10 px-4">
             <button onClick={() => setTerminalOpen((v) => !v)} className="text-xs font-medium text-cream/70">⌄ Terminal</button>
             <span className={`h-1.5 w-1.5 rounded-full ${workspaceReady ? "bg-moss" : "bg-clay"}`} />
-            <span className="text-[10px] text-cream/30">{workspaceReady ? "Persistent workspace" : "Connecting…"}</span>
+            <span className="text-[10px] text-cream/30">{workspaceReady ? `Persistent workspace${workspaceSyncing ? " · syncing" : ""}` : "Connecting…"}</span>
             <div className="ml-auto flex items-center gap-1">
               <input value={livePort} onChange={(e) => setLivePort(e.target.value)} className="w-14 rounded border border-white/10 bg-white/5 px-1.5 py-1 text-[10px] text-cream outline-none" />
               <button onClick={openLivePreview} className="rounded border border-white/10 px-2 py-1 text-[10px] text-cream/60 hover:bg-white/10 hover:text-cream">Open preview</button>
@@ -334,7 +347,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
           </div>
         )}
         {publishError && <p className="border-t border-white/10 bg-red-950/40 px-5 py-2 text-xs text-red-300">{publishError}</p>}
-        {files.length > 0 && !previewHtml && viewMode === "code" && !publishedUrl && !publishError && (
+        {displayFiles.length > 0 && !previewHtml && viewMode === "code" && !publishedUrl && !publishError && (
           <p className="border-t border-white/10 px-5 py-2 text-xs text-cream/35">
             No static preview for this file type — hit <strong className="text-clay">Publish</strong> above to put it on a real live URL instead.
           </p>
