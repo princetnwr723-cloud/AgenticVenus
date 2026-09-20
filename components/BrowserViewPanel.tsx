@@ -6,7 +6,8 @@
 // Browserless plan doesn't support a live view, we say so plainly
 // instead of blocking, since the agent's actual work isn't affected.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { auth } from "@/lib/firebase";
 
 type Props = {
   open: boolean;
@@ -14,7 +15,7 @@ type Props = {
   liveUrl: string | null;
   active: boolean; // a session is running, live view or not
   starting: boolean;
-  onStart: () => void;
+  onStart: (profileName?: string) => void;
   onStop: () => void;
   stepLog: string[];
   onRunTask?: (task: string) => void;
@@ -34,6 +35,21 @@ export default function BrowserViewPanel({
   running,
 }: Props) {
   const [taskInput, setTaskInput] = useState("");
+  const [profiles, setProfiles] = useState<{ name: string; cookieCount?: number; originCount?: number }[]>([]);
+  const [profileName, setProfileName] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    (async () => {
+      try {
+        const token = await auth.currentUser?.getIdToken();
+        if (!token) return;
+        const res = await fetch("/api/browser/profiles", { headers: { authorization: `Bearer ${token}` } });
+        const data = await res.json();
+        if (res.ok) setProfiles(data.profiles || []);
+      } catch {}
+    })();
+  }, [open]);
   if (!open) return null;
 
   const lastError = [...stepLog].reverse().find((s) => /error|fail|couldn't|failed/i.test(s));
@@ -53,7 +69,7 @@ export default function BrowserViewPanel({
               </button>
             ) : (
               <button
-                onClick={onStart}
+                onClick={() => onStart(profileName || undefined)}
                 disabled={starting}
                 className="rounded-md bg-moss px-2.5 py-1 text-xs font-medium text-cream hover:bg-moss/80 disabled:opacity-50"
               >
@@ -70,8 +86,18 @@ export default function BrowserViewPanel({
           <p className="border-b border-red-900/50 bg-red-950/50 px-5 py-2.5 text-xs text-red-300">{lastError}</p>
         )}
 
+        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-2">
+          <span className="text-[11px] text-cream/40">Profile</span>
+          <select value={profileName} onChange={(e) => setProfileName(e.target.value)} className="max-w-[240px] rounded border border-white/10 bg-[#2a2723] px-2 py-1 text-xs text-cream outline-none">
+            <option value="">Default browser</option>
+            {profiles.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+          </select>
+          <span className="text-[10px] text-cream/30">Use a saved Browserless profile for Gmail/other signed-in sites.</span>
+          <a href="https://www.browserless.io/dashboard/profiles" target="_blank" rel="noreferrer" className="ml-auto shrink-0 text-[10px] text-moss hover:underline">Manage profiles ↗</a>
+        </div>
+
         {liveUrl ? (
-          <iframe title="Browser live view" src={liveUrl} className="h-full w-full flex-1 border-0 bg-white" />
+          <iframe title="Browser live view" src={liveUrl} allow="clipboard-read; clipboard-write" sandbox="allow-same-origin allow-scripts" className="h-full w-full flex-1 border-0 bg-white" />
         ) : active ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
             <p className="text-sm text-cream/60">
@@ -123,4 +149,3 @@ export default function BrowserViewPanel({
       </div>
     </div>
   );
-}
