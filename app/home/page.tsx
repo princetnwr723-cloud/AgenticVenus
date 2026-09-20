@@ -675,19 +675,26 @@ export default function HomePage() {
     missionCancelledRef.current = false;
     setActiveMission(mission);
     const { provider, apiKey: activeKey, model } = activeConnection;
+
+    let liveMessages = messages;
+
     const final = await runMission(
       user.uid, provider.id, activeKey, mission,
       !!integrationKeys.browserlessApiKey, !!integrationKeys.daytonaApiKey, model,
       (m) => setActiveMission(m),
       (s) => setAgentStatus(s),
-      () => missionCancelledRef.current
+      () => missionCancelledRef.current,
+      async (msg) => {
+        liveMessages = [...liveMessages, msg];
+        setMessages(liveMessages);
+        await persist(liveMessages, targetChatId, activeAgent?.id, provider.id);
+      }
     );
     setAgentStatus(null);
     if (final.summary) {
-      const summaryMsg: ChatMessage = { role: "assistant", content: final.summary };
-      const finalMessages = [...messages, summaryMsg];
-      setMessages(finalMessages);
-      await persist(finalMessages, targetChatId, activeAgent?.id, provider.id);
+      liveMessages = [...liveMessages, { role: "assistant", content: final.summary }];
+      setMessages(liveMessages);
+      await persist(liveMessages, targetChatId, activeAgent?.id, provider.id);
     }
   }
 
