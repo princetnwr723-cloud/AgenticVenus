@@ -30,7 +30,7 @@ import PlanApprovalCard from "@/components/PlanApprovalCard";
 import WorkingCard from "@/components/WorkingCard";
 import CapabilityConnectPrompt from "@/components/CapabilityConnectPrompt";
 import { looksLikeDeveloperTask, runDeveloperWorkspace } from "@/lib/developerRuntime";
-import { startComputerSession, stopComputerSession, runComputerTask } from "@/lib/computerClient";
+import { startComputerSession, stopComputerSession, runComputerTask, getComputerLiveUrl } from "@/lib/computerClient";
 import { startBrowserSession, stopBrowserSession, runBrowserTask, listBrowserProfiles } from "@/lib/browserClient";
 import { decideAutoTools, type AutoToolDecision } from "@/lib/autoTools";
 import { generateTaskPlan } from "@/lib/taskPlanner";
@@ -147,7 +147,7 @@ export default function HomePage() {
 
   const [toolNeed, setToolNeed] = useState<ToolNeed | null>(null);
   const [pendingTaskAfterConnect, setPendingTaskAfterConnect] = useState<string | null>(null);
-  const [capabilityNeed, setCapabilityNeed] = useState<"browser" | "computer" | null>(null);
+  const [capabilityNeed, setCapabilityNeed] = useState<"browser" | "computer" | "browserProfile" | null>(null);
 
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [chatId, setChatId] = useState<string | null>(null);
@@ -204,7 +204,7 @@ export default function HomePage() {
   }, [loading, user, router]);
 
   async function refreshToolState() {
-    if (!user) return;
+    if (!user) return { toolIds: connectedToolIds, servers: mcpServers, intKeys: integrationKeys };
     const [toolIds, servers, intKeys] = await Promise.all([
       listConnectedPluginIds(user.uid),
       listMCPServers(user.uid),
@@ -213,6 +213,7 @@ export default function HomePage() {
     setConnectedToolIds(toolIds);
     setMcpServers(servers);
     setIntegrationKeys(intKeys);
+    return { toolIds, servers, intKeys };
   }
 
   async function refreshChats() {
@@ -496,8 +497,8 @@ export default function HomePage() {
     try {
       const { sandboxId } = await startComputerSession();
       setComputerSandboxId(sandboxId);
-      const idToken = await auth.currentUser?.getIdToken();
-      setComputerStreamUrl(`/api/computer/view/${sandboxId}/${idToken}/vnc.html`);
+      const liveUrl = await getComputerLiveUrl(sandboxId);
+      setComputerStreamUrl(liveUrl);
     } catch (err) {
       setComputerStepLog((prev) => [...prev, err instanceof Error ? err.message : "Failed to start computer."]);
     } finally {
@@ -735,9 +736,24 @@ export default function HomePage() {
       return;
     }
 
-    const effectiveToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
+    // Refresh immediately before routing. A connection made seconds ago must be
+    // visible to the agent even if the 8-second background sync has not fired yet.
+    const freshTools = await refreshToolState();
+    const effectiveToolIds = effectiveConnectedToolIds(freshTools.toolIds, freshTools.servers);
     const need = await detectToolNeed(provider.id, activeKey, nextMessages, effectiveToolIds, model);
-    const browserCanFallback = !!integrationKeys.browserlessApiKey && /email|gmail|outlook|mail/i.test(need?.toolName || "");
+    const emailTask = /email|gmail|outlook|mail/i.test(`${task} ${need?.toolName || ""}`);
+    let browserCanFallback = false;
+    if (emailTask && !need?.connected && freshTools.intKeys.browserlessApiKey) {
+      const profiles = await listBrowserProfiles().catch(() => []);
+      const matchingProfile = profiles.find((p) => /gmail|mail|outlook|email/i.test(p.name));
+      if (matchingProfile) browserCanFallback = true;
+      else {
+        setCapabilityNeed("browserProfile");
+        setPendingTaskAfterConnect(task);
+        await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+        return;
+      }
+    }
     if (need && !need.connected && !browserCanFallback) {
       setToolNeed(need);
       setPendingTaskAfterConnect(task);
@@ -760,8 +776,8 @@ export default function HomePage() {
       provider.id,
       activeKey,
       task,
-      !!integrationKeys.browserlessApiKey,
-      !!integrationKeys.daytonaApiKey,
+      !!freshTools.intKeys.browserlessApiKey,
+      !!freshTools.intKeys.daytonaApiKey,
       myConnectedAgents,
       model
     );
@@ -816,9 +832,15 @@ export default function HomePage() {
 
     let toolResultNote = "";
     let externalToolHandled = false;
+    const freshTools = await refreshToolState();
+    const runtimeToolIds = effectiveConnectedToolIds(freshTools.toolIds, freshTools.servers);
 
-    if (activeAgent?.id === "developer" && looksLikeDeveloperTask(task)) {
-      setAgentStatus("💻 Developer Agent: terminal → build → preview → verify");
+    if (looksLikeDeveloperTask(task)) {
+      if (activeAgent?.id !== "developer") setActiveAgent(getAgentById("developer") || activeAgent);
+      // Open Codespace before execution so the user can watch the real workspace
+      // files appear/change while the developer agent is working.
+      setCodespaceOpen(true);
+      setAgentStatus("💻 Developer Agent: terminal → code → build → preview → verify");
       try {
         const dev = await runDeveloperWorkspace(provider.id, activeKey, task, model, nextMessages, (step) => setAgentStatus(`💻 ${step}`));
         setLivePreviewUrl(dev.previewUrl || null);
@@ -831,38 +853,51 @@ export default function HomePage() {
       }
     }
 
-    if (mcpServers.length > 0) {
-      const toolCall = await decideMcpToolCall(provider.id, activeKey, nextMessages, mcpServers, model);
-      if (toolCall) {
-        setUsingMcpTool(toolCall.toolName);
-        try {
-          const result = await callMcpTool(toolCall.serverId, toolCall.toolName, toolCall.arguments);
-          externalToolHandled = true;
-          toolResultNote = `You just used the "${toolCall.toolName}" tool and got this result:\n${result}\n\nIncorporate this into your reply to the user naturally — don't just repeat it verbatim, explain what it means.`;
-        } catch (err) {
-          toolResultNote = `You attempted to use the "${toolCall.toolName}" tool but the call failed: ${
-            err instanceof Error ? err.message : "unknown error"
-          }.`;
+    // Multi-action tool loop: after each real tool call, feed the result back
+    // to the planner and let it choose the next required connected tool. This
+    // allows prompts such as "read my Gmail, create a calendar event, then
+    // message me" to execute as one approved task instead of stopping after
+    // the first tool call.
+    const toolLoopMessages = [...nextMessages];
+    for (let toolRound = 0; toolRound < 6; toolRound++) {
+      let handledThisRound = false;
+      if (freshTools.servers.length > 0) {
+        const toolCall = await decideMcpToolCall(provider.id, activeKey, toolLoopMessages, freshTools.servers, model);
+        if (toolCall) {
+          setUsingMcpTool(toolCall.toolName);
+          try {
+            const result = await callMcpTool(toolCall.serverId, toolCall.toolName, toolCall.arguments);
+            handledThisRound = true;
+            externalToolHandled = true;
+            toolResultNote += `\n\nMCP ${toolCall.toolName} result:\n${result}`;
+            toolLoopMessages.push({ role: "assistant", content: `[REAL TOOL RESULT] ${toolCall.toolName}: ${result}` });
+          } catch (err) {
+            toolResultNote += `\n\nMCP ${toolCall.toolName} failed: ${err instanceof Error ? err.message : "unknown error"}.`;
+            toolLoopMessages.push({ role: "assistant", content: `[REAL TOOL FAILURE] ${toolCall.toolName}: ${err instanceof Error ? err.message : "unknown error"}` });
+          } finally {
+            setUsingMcpTool(null);
+          }
         }
-        setUsingMcpTool(null);
       }
-    }
-
-    if (!externalToolHandled && effectiveConnectedToolIds(connectedToolIds, mcpServers).length > 0) {
-      const planned = await decidePluginAction(provider.id, activeKey, nextMessages, connectedToolIds, model);
-      if (planned) {
-        setUsingPluginAction(planned.actionName);
-        try {
-          const result = await callPluginAction(planned.toolId, planned.actionId, planned.params);
-          externalToolHandled = true;
-          toolResultNote += `\n\nYou just used "${planned.actionName}" for real and got this result:\n${result}\n\nTell the user what happened, referencing the real outcome above.`;
-        } catch (err) {
-          toolResultNote += `\n\nYou attempted "${planned.actionName}" but it failed: ${
-            err instanceof Error ? err.message : "unknown error"
-          }.`;
+      if (!handledThisRound && runtimeToolIds.length > 0) {
+        const planned = await decidePluginAction(provider.id, activeKey, toolLoopMessages, freshTools.toolIds, model);
+        if (planned) {
+          setUsingPluginAction(planned.actionName);
+          try {
+            const result = await callPluginAction(planned.toolId, planned.actionId, planned.params);
+            handledThisRound = true;
+            externalToolHandled = true;
+            toolResultNote += `\n\nPlugin ${planned.actionName} result:\n${result}`;
+            toolLoopMessages.push({ role: "assistant", content: `[REAL TOOL RESULT] ${planned.actionName}: ${result}` });
+          } catch (err) {
+            toolResultNote += `\n\nPlugin ${planned.actionName} failed: ${err instanceof Error ? err.message : "unknown error"}.`;
+            toolLoopMessages.push({ role: "assistant", content: `[REAL TOOL FAILURE] ${planned.actionName}: ${err instanceof Error ? err.message : "unknown error"}` });
+          } finally {
+            setUsingPluginAction(null);
+          }
         }
-        setUsingPluginAction(null);
       }
+      if (!handledThisRound) break;
     }
 
     if (autoDecision.askAgentChatId) {
@@ -931,8 +966,9 @@ export default function HomePage() {
           const started = await startComputerSession();
           sbx = started.sandboxId;
           setComputerSandboxId(sbx);
-          const idToken = await auth.currentUser?.getIdToken();
-          setComputerStreamUrl(`/api/computer/view/${sbx}/${idToken}/vnc.html`);
+          const liveUrl = await getComputerLiveUrl(sbx);
+          setComputerStreamUrl(liveUrl);
+          setComputerViewOpen(true);
           autoStarted = true;
           computerAutoStarted.current = true;
         }
@@ -948,9 +984,7 @@ export default function HomePage() {
         toolResultNote += `\n\nYou tried to use the computer but couldn't get a verified result after ${recovery.attempts} attempt(s): ${recovery.error.suggestion} (${recovery.rawMessage}). Tell the user plainly what was attempted and what's uncertain — don't claim success.`;
       }
       if (autoStarted && computerAutoStarted.current) {
-        await stopComputerSession(sbx!);
-        setComputerSandboxId(null);
-        setComputerStreamUrl(null);
+        setComputerViewOpen(true);
         computerAutoStarted.current = false;
       }
       setAgentStatus(null);
@@ -959,10 +993,10 @@ export default function HomePage() {
     const activeCatalogGroup = groups.find((g) => g.id === activeGroupId) || null;
 
     setSending(true);
-    const toolNames = connectedToolNames(effectiveConnectedToolIds(connectedToolIds, mcpServers));
+    const toolNames = connectedToolNames(runtimeToolIds);
     const toolsContext =
       toolNames.length > 0
-        ? `You currently have access to these connected tools: ${toolNames.join(", ")}. If asked to do something with one of them, answer as if you used it. If asked to do something requiring a tool NOT in this list, tell the user they can connect it in Plugins, or through MCP Tools if it's not a built-in plugin.`
+        ? `You currently have access to these connected tools: ${toolNames.join(", ")}. Only claim you used a connected tool when the REAL TOOL RESULT below proves that it was actually called. If a requested tool is not connected, tell the user what needs to be connected instead of pretending it worked.`
         : "You don't have any tools connected yet. If a request needs an external tool (email, calendar, etc.), tell the user to connect it in Plugins or MCP Tools.";
 
     const infraToolsContext = [
