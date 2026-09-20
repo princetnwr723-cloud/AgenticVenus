@@ -50,7 +50,7 @@ export default function ComputerViewPanel({
 
         {streamUrl ? (
           <>
-            <iframe title="Cloud computer live view" src={streamUrl} className="h-full w-full flex-1 border-0 bg-black" />
+            <iframe title="Cloud computer live view" src={streamUrl} allow="clipboard-read; clipboard-write" sandbox="allow-same-origin allow-scripts allow-forms allow-popups" className="h-full w-full flex-1 border-0 bg-black" />
             {onOpenRawLink && (
               <p className="border-t border-white/10 px-5 py-2 text-xs text-cream/35">
                 Screen stuck on "Connecting..."? Hit <strong className="text-clay">Open directly ↗</strong> above —
