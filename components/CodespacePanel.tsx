@@ -7,6 +7,7 @@ import { buildPreviewHtml, listHtmlPages } from "@/lib/preview";
 import { highlightCode } from "@/lib/syntaxHighlight";
 import { publishProject } from "@/lib/publishClient";
 import VerificationBadge from "@/components/VerificationBadge";
+import { writeAgentFile } from "@/lib/workspaceClient";
 
 type Props = {
   open: boolean;
@@ -46,6 +47,9 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
   const [zipping, setZipping] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [previewPage, setPreviewPage] = useState<string | null>(null);
+  const [editedCode, setEditedCode] = useState("");
+  const [savingCode, setSavingCode] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
   const [publishing, setPublishing] = useState(false);
   const [publishMenuOpen, setPublishMenuOpen] = useState(false);
@@ -60,6 +64,12 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
       setViewMode("code");
     }
   }, [open, openFileId]);
+
+  useEffect(() => {
+    const current = files.find((f) => f.id === activeId) ?? files[files.length - 1];
+    setEditedCode(current?.code || "");
+    setSaveMessage(null);
+  }, [activeId, files]);
 
   if (!open) return null;
 
@@ -100,6 +110,20 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
     if (!active) return;
     const safeName = active.filename.split("/").pop() || active.filename;
     triggerDownload(new Blob([active.code], { type: "text/plain" }), safeName);
+  }
+
+  async function handleSaveToCloud() {
+    if (!active || savingCode) return;
+    setSavingCode(true);
+    setSaveMessage(null);
+    try {
+      await writeAgentFile(active.filename, editedCode);
+      setSaveMessage("Saved to cloud workspace ✓");
+    } catch (err) {
+      setSaveMessage(err instanceof Error ? err.message : "Cloud save failed.");
+    } finally {
+      setSavingCode(false);
+    }
   }
 
   async function handleDownloadAll() {
@@ -199,16 +223,22 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
               ))}
             </div>
             <div className="flex-1 overflow-auto p-5">
-              <div className="mb-3 flex items-center justify-between">
-                <p className="text-xs text-cream/40">{active?.filename}</p>
-                <div className="flex gap-2">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <p className="min-w-0 truncate text-xs text-cream/40">{active?.filename}</p>
+                <div className="flex shrink-0 gap-2">
+                  <button onClick={handleSaveToCloud} disabled={savingCode} className="focus-ring rounded-md border border-moss/30 bg-moss/10 px-2.5 py-1 text-xs text-moss transition-colors hover:bg-moss/20 disabled:opacity-50">{savingCode ? "Saving..." : "Save to Cloud"}</button>
                   <button onClick={handleDownloadFile} className="focus-ring rounded-md border border-white/15 px-2.5 py-1 text-xs text-cream/70 transition-colors hover:bg-white/10 hover:text-cream">Download</button>
                   <button onClick={handleCopy} className="focus-ring rounded-md border border-white/15 px-2.5 py-1 text-xs text-cream/70 transition-colors hover:bg-white/10 hover:text-cream">{copied ? "Copied ✓" : "Copy"}</button>
                 </div>
               </div>
-              <pre className="animate-fade-in whitespace-pre-wrap break-words font-mono text-[13px] leading-relaxed text-cream/90">
-                <code dangerouslySetInnerHTML={{ __html: active ? highlightCode(active.code, active.language) : "" }} />
-              </pre>
+              <textarea
+                value={editedCode}
+                onChange={(e) => { setEditedCode(e.target.value); setSaveMessage(null); }}
+                spellCheck={false}
+                className="h-full min-h-[420px] w-full resize-none rounded-md border border-white/10 bg-[#141311] p-4 font-mono text-[13px] leading-relaxed text-cream/90 outline-none focus:border-white/20"
+                aria-label={active?.filename || "Code editor"}
+              />
+              {saveMessage && <p className="mt-2 text-[11px] text-cream/40">{saveMessage}</p>}
             </div>
           </div>
         )}
