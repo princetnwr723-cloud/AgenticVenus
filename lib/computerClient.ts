@@ -35,6 +35,13 @@ async function act(sandboxId: string, action: ComputerAction): Promise<string> {
   return data.screenshotBase64 as string;
 }
 
+export async function getComputerLiveUrl(sandboxId: string): Promise<string> {
+  const res = await fetch(`/api/computer/live-url?sandboxId=${encodeURIComponent(sandboxId)}`, { headers: await authedHeaders(), cache: "no-store" });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || "Failed to create the computer live view.");
+  return data.url as string;
+}
+
 export async function stopComputerSession(sandboxId: string): Promise<void> {
   try {
     await fetch("/api/computer/stop", {
