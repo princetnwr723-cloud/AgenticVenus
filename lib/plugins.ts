@@ -10,6 +10,83 @@
 // not yet wired to each service's real OAuth flow. That's the next step;
 // for now this is what lets the rest of the tool-awareness system work.
 
+import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
+
+export type ToolNeed = {
+  toolId: string | null;
+  toolName: string;
+  known: boolean;
+  connected: boolean;
+};
+
+function extractToolJson(text: string): string {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  return (fenced ? fenced[1] : text).trim();
+}
+
+function toolTranscript(messages: ChatMessage[], turns = 8): string {
+  return messages
+    .slice(-turns)
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+    .join("\n");
+}
+
+function deterministicToolId(task: string, connectedToolIds: string[]): string | null {
+  const lower = task.toLowerCase();
+  const has = (id: string) => connectedToolIds.includes(id);
+  if (/\b(outlook|microsoft mail)\b/.test(lower) && has("outlook-mail")) return "outlook-mail";
+  if (/\bgmail|google mail\b/.test(lower) && has("gmail")) return "gmail";
+  if (/\b(calendar|meeting|appointment)\b/.test(lower) && has("google-calendar")) return "google-calendar";
+  if (/\bdrive\b/.test(lower) && has("google-drive")) return "google-drive";
+  if (/\bgithub|repository|pull request|issue\b/.test(lower) && has("github")) return "github";
+  if (/\bslack\b/.test(lower) && has("slack")) return "slack";
+  if (/\bnotion\b/.test(lower) && has("notion")) return "notion";
+  if (/\b(email|mail|inbox|send|reply)\b/.test(lower) && has("gmail")) return "gmail";
+  return null;
+}
+
+export async function detectToolNeed(
+  providerId: string,
+  apiKey: string,
+  messages: ChatMessage[],
+  connectedToolIds: string[],
+  model?: string
+): Promise<ToolNeed | null> {
+  const latest = messages[messages.length - 1]?.content || "";
+  const deterministic = deterministicToolId(latest, connectedToolIds);
+  if (deterministic) {
+    const tool = PLUGIN_TOOLS.find((t) => t.id === deterministic);
+    return {
+      toolId: deterministic,
+      toolName: tool?.name || deterministic,
+      known: true,
+      connected: true,
+    };
+  }
+
+  const catalog = PLUGIN_TOOLS.map((t) => `${t.id}: ${t.name} — ${t.description}`).join("\n");
+  const prompt = `Decide if the latest message requires an external tool/account. Use the conversation for context.\n\nConversation:\n${toolTranscript(messages)}\n\nTool catalog:\n${catalog}\n\nReply ONLY JSON: {"needsTool": boolean, "toolId": "catalog id or null", "toolName": "human name or empty"}`;
+  try {
+    const { text } = await sendChatMessage({
+      providerId,
+      apiKey,
+      messages: [{ role: "user", content: prompt }],
+      model,
+    });
+    const parsed = JSON.parse(extractToolJson(text));
+    if (!parsed?.needsTool) return null;
+    const known = !!parsed.toolId && PLUGIN_TOOLS.some((t) => t.id === parsed.toolId);
+    return {
+      toolId: known ? parsed.toolId : null,
+      toolName: parsed.toolName || parsed.toolId || "this tool",
+      known,
+      connected: known ? connectedToolIds.includes(parsed.toolId) : false,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export type PluginCategory =
   | "automation"
   | "search"
