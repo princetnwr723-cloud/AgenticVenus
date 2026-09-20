@@ -19,6 +19,7 @@ import GroupChatView from "@/components/GroupChatView";
 import AgentSettingsModal from "@/components/AgentSettingsModal";
 import AnimatedAvatar from "@/components/AnimatedAvatar";
 import CodespacePanel from "@/components/CodespacePanel";
+import CloudWorkspacePanel from "@/components/CloudWorkspacePanel";
 import ModelDropdown from "@/components/ModelDropdown";
 import SettingsPanel from "@/components/SettingsPanel";
 import ToolConnectPrompt from "@/components/ToolConnectPrompt";
@@ -125,6 +126,7 @@ export default function HomePage() {
   const [mcpPrefill, setMcpPrefill] = useState<{ name: string; url: string } | null>(null);
   const [businessOpen, setBusinessOpen] = useState(false);
   const [codespaceOpen, setCodespaceOpen] = useState(false);
+  const [cloudWorkspaceOpen, setCloudWorkspaceOpen] = useState(false);
   const [codespaceOpenFileId, setCodespaceOpenFileId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [groupsOpen, setGroupsOpen] = useState(false);
@@ -1089,7 +1091,8 @@ export default function HomePage() {
     }
 
     setClassifying(false);
-    const agent = selectedAgent;
+    const agent = activeAgent || await classifyAgent(provider.id, activeKey, task, model);
+    if (!activeAgent) setActiveAgent(agent);
 
     const lessons = await getAgentLessons(user.uid, agent.id);
     const systemPrompt = [
@@ -1234,6 +1237,13 @@ export default function HomePage() {
               >
                 <span className="h-1.5 w-1.5 rounded-full bg-[#4D6BFE]" />
                 Codespace
+              </button>
+              <button
+                onClick={() => setCloudWorkspaceOpen(true)}
+                className="focus-ring flex items-center gap-2 rounded-md border border-moss/20 bg-moss/5 px-3 py-1.5 text-xs font-medium text-ink/80 transition-all hover:-translate-y-0.5 hover:bg-moss/10 hover:shadow-sm"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-moss" />
+                Cloud Terminal
               </button>
               <button
                 onClick={() => setComputerViewOpen(true)}
@@ -1547,6 +1557,7 @@ export default function HomePage() {
         />
       )}
       <MissionsPanel uid={user.uid} open={missionsOpen} onClose={() => setMissionsOpen(false)} onResume={handleResumeMission} />
+      <CloudWorkspacePanel open={cloudWorkspaceOpen} onClose={() => setCloudWorkspaceOpen(false)} />
       <CodespacePanel
         open={codespaceOpen}
         onClose={() => {
