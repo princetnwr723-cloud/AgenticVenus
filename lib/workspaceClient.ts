@@ -17,10 +17,16 @@ async function request<T>(body: Record<string, unknown>): Promise<T> {
 
 export type WorkspaceInfo = { sandboxId: string; state?: string; workDir?: string; projectDir: string; updatedAt: number };
 export type CommandResult = { sandboxId: string; command: string; cwd: string; exitCode?: number; output: string };
+export type WorkspaceFile = { path: string; content?: string; size?: number };
 
 export async function ensureAgentWorkspace() {
   const data = await request<{ workspace: WorkspaceInfo }>({ action: "ensure" });
   return data.workspace;
+}
+
+export async function listAgentFiles(includeContent = false) {
+  const data = await request<{ files: WorkspaceFile[] }>({ action: "list", includeContent });
+  return data.files;
 }
 
 export async function runAgentCommand(command: string, cwd = "workspace", timeout = 120) {
