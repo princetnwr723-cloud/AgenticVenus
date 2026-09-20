@@ -1,9 +1,5 @@
 // lib/errorClassifier.ts
-// Turns a raw error message into an actionable category, so recovery
-// logic can decide "retry this" vs "don't bother, ask the user" instead
-// of treating every failure the same way.
-
-export type ErrorCategory = "network" | "auth" | "rate_limit" | "not_found" | "invalid_input" | "timeout" | "unavailable" | "unknown";
+export type ErrorCategory = "network" | "auth" | "rate_limit" | "not_found" | "invalid_input" | "timeout" | "unavailable" | "missing_config" | "unknown";
 
 export type ClassifiedError = {
   category: ErrorCategory;
@@ -13,6 +9,9 @@ export type ClassifiedError = {
 
 export function classifyError(message: string): ClassifiedError {
   const m = message.toLowerCase();
+  if (/^no_browser|^no_computer/.test(m)) {
+    return { category: "missing_config", retryable: false, suggestion: "Add the required API key in Settings → Integrations — retrying won't help without it." };
+  }
   if (/timeout|timed out/.test(m)) return { category: "timeout", retryable: true, suggestion: "Retry with a longer wait, or break the task into smaller steps." };
   if (/rate limit|429|too many requests/.test(m)) return { category: "rate_limit", retryable: true, suggestion: "Wait longer before retrying." };
   if (/401|403|unauthorized|forbidden|invalid.*(key|token)|authentication/.test(m)) return { category: "auth", retryable: false, suggestion: "Check that the API key/token is valid and has the right permissions." };
