@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
     if (!sandboxId) return NextResponse.json({ error: "sandboxId is required." }, { status: 400 });
 
     const apiKey = await resolveIntegrationSecret(decoded.uid, "daytonaApiKey");
-    if (apiKey) await stopComputer(sandboxId, apiKey);
+    if (apiKey) await stopComputer(sandboxId, apiKey, decoded.uid);
 
     return NextResponse.json({ ok: true });
   } catch (err) {
