@@ -3,7 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { CodeFile } from "@/lib/codeExtract";
 import type { Attachment } from "@/lib/chatClient";
-import { buildPreviewHtml, listHtmlPages } from "@/lib/preview";
+import { buildPreviewHtml, listHtmlPages, languageForPath } from "@/lib/preview";
 import { highlightCode } from "@/lib/syntaxHighlight";
 import { publishProject } from "@/lib/publishClient";
 import VerificationBadge from "@/components/VerificationBadge";
@@ -85,7 +85,12 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
       setWorkspaceSyncing(true);
       await ensureAgentWorkspace();
       const remote = await listAgentFiles(true);
-      const mapped: CodeFile[] = remote.map((f) => ({ id: `workspace:${f.path}`, filename: f.path, code: f.content || "" }));
+      const mapped: CodeFile[] = remote.map((f) => ({
+        id: `workspace:${f.path}`,
+        filename: f.path,
+        code: f.content || "",
+        language: languageForPath(f.path),
+      }));
       setWorkspaceFiles(mapped);
       setWorkspaceReady(true);
       if (!activeId && mapped.length) setActiveId(mapped[mapped.length - 1].id);
