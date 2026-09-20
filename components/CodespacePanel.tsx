@@ -250,7 +250,25 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
                 <span className="text-xs text-cream/30">Links between pages won't navigate here — switch pages with this dropdown instead.</span>
               </div>
             )}
-            <iframe title="Codespace preview" srcDoc={previewHtml} sandbox="allow-scripts allow-modals allow-forms allow-same-origin" className="h-full w-full flex-1 border-0 bg-white" />
+            {livePreviewUrl ? (
+              <iframe
+                title="Codespace live preview"
+                src={livePreviewUrl}
+                sandbox="allow-scripts allow-forms allow-same-origin"
+                className="h-full w-full flex-1 border-0 bg-white"
+              />
+            ) : previewHtml ? (
+              <iframe
+                title="Codespace preview"
+                srcDoc={previewHtml}
+                sandbox="allow-scripts allow-modals allow-forms allow-same-origin"
+                className="h-full w-full flex-1 border-0 bg-white"
+              />
+            ) : (
+              <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-cream/40">
+                {livePreviewMessage || "No preview is available yet."}
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex flex-1 overflow-hidden">
