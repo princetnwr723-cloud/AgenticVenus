@@ -16,7 +16,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No Browserless API key — add yours in Settings → Integrations." }, { status: 400 });
     }
 
-    const result = await startBrowserSession(decoded.uid, apiKey);
+    const body = await req.json().catch(() => ({}));
+    const profileName = typeof body?.profileName === "string" ? body.profileName.trim() : undefined;
+    const result = await startBrowserSession(decoded.uid, apiKey, profileName || undefined);
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     console.error("[api/browser/start]", err);
