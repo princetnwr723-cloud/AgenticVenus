@@ -72,7 +72,7 @@ import {
 } from "@/lib/businessDNA";
 import { runDueTasks, addScheduledTask, nextOccurrence } from "@/lib/scheduler";
 import { detectScheduleIntent } from "@/lib/scheduleDetect";
-import { detectToolNeed, type ToolNeed } from "@/lib/toolDetect";
+import { detectToolNeed, type ToolNeed } from "@/lib/plugins";
 import { listConnectedPluginIds, connectedToolNames, effectiveConnectedToolIds } from "@/lib/pluginConnections";
 import { listMCPServers, type MCPServer } from "@/lib/mcp";
 import { decideMcpToolCall, callMcpTool } from "@/lib/mcpOrchestrator";
