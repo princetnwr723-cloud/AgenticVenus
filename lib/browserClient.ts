@@ -11,11 +11,18 @@ async function authedHeaders() {
   return { "content-type": "application/json", authorization: `Bearer ${idToken}` };
 }
 
-export async function startBrowserSession(): Promise<{ sessionId: string; liveUrl: string }> {
-  const res = await fetch("/api/browser/start", { method: "POST", headers: await authedHeaders() });
+export async function listBrowserProfiles(): Promise<{ name: string; cookieCount?: number; originCount?: number }[]> {
+  const res = await fetch("/api/browser/profiles", { headers: await authedHeaders(), cache: "no-store" });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || "Failed to list Browserless profiles.");
+  return Array.isArray(data.profiles) ? data.profiles : [];
+}
+
+export async function startBrowserSession(profileName?: string): Promise<{ sessionId: string; liveUrl: string; profileName?: string }> {
+  const res = await fetch("/api/browser/start", { method: "POST", headers: await authedHeaders(), body: JSON.stringify({ profileName: profileName || undefined }) });
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error || "Failed to start the browser.");
-  return { sessionId: data.sessionId, liveUrl: data.liveUrl };
+  return { sessionId: data.sessionId, liveUrl: data.liveUrl, profileName: data.profileName };
 }
 
 async function act(sessionId: string, action: BrowserAction) {
