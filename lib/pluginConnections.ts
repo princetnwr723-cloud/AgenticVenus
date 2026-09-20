@@ -41,14 +41,15 @@ export function connectedToolNames(connectedIds: string[]): string[] {
 
 export function effectiveConnectedToolIds(
   connectedIds: string[],
-  mcpServers: { name: string }[]
+  mcpServers: { name: string; tools?: { name?: string; description?: string }[] }[]
 ): string[] {
   const mcpCovered = PLUGIN_TOOLS.filter((t) => {
     const toolId = t.id.toLowerCase();
     const toolName = t.name.toLowerCase();
     return mcpServers.some((s) => {
       const serverName = s.name.toLowerCase();
-      return serverName.includes(toolId) || serverName.includes(toolName) || toolName.includes(serverName);
+      const toolText = (s.tools || []).map((x) => `${x.name || ""} ${x.description || ""}`).join(" ").toLowerCase();
+      return serverName.includes(toolId) || serverName.includes(toolName) || toolName.includes(serverName) || toolText.includes(toolId) || toolText.includes(toolName);
     });
   }).map((t) => t.id);
 
