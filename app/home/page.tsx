@@ -27,10 +27,11 @@ import ComputerViewPanel from "@/components/ComputerViewPanel";
 import BrowserViewPanel from "@/components/BrowserViewPanel";
 import AgentStatusLine from "@/components/AgentStatusLine";
 import PlanApprovalCard from "@/components/PlanApprovalCard";
-import MissionsPanel from "@/components/MissionsPanel";
-import MissionCard from "@/components/MissionCard";
+import WorkingCard from "@/components/WorkingCard";
+import CapabilityConnectPrompt from "@/components/CapabilityConnectPrompt";
+import { looksLikeDeveloperTask, runDeveloperWorkspace } from "@/lib/developerRuntime";
 import { startComputerSession, stopComputerSession, runComputerTask } from "@/lib/computerClient";
-import { startBrowserSession, stopBrowserSession, runBrowserTask } from "@/lib/browserClient";
+import { startBrowserSession, stopBrowserSession, runBrowserTask, listBrowserProfiles } from "@/lib/browserClient";
 import { decideAutoTools, type AutoToolDecision } from "@/lib/autoTools";
 import { generateTaskPlan } from "@/lib/taskPlanner";
 import { importSkillFromUrl } from "@/lib/skillImportClient";
@@ -41,9 +42,6 @@ import { listAgentConnections, type AgentConnection } from "@/lib/agentLinks";
 import { askConnectedAgent } from "@/lib/agentLinkOrchestrator";
 import { listChatGroups, type ChatGroup } from "@/lib/chatGroups";
 import { getAgentIdentity, saveAgentIdentity, type AgentIdentity } from "@/lib/agentIdentity";
-import { createMission, findResumableMission, updateMission, type Mission } from "@/lib/missions";
-import { decideMissionIntent, decideContinueIntent } from "@/lib/missionPlanner";
-import { runMission } from "@/lib/missionEngine";
 import { verifyTaskResult } from "@/lib/verification";
 import { withRecovery } from "@/lib/recoveryEngine";
 import FilesPanel from "@/components/FilesPanel";
@@ -132,17 +130,12 @@ export default function HomePage() {
   const [groupsOpen, setGroupsOpen] = useState(false);
   const [connectionsOpen, setConnectionsOpen] = useState(false);
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
-  const [missionsOpen, setMissionsOpen] = useState(false);
 
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
   const [classifying, setClassifying] = useState(false);
   const [agentStatus, setAgentStatus] = useState<string | null>(null);
   const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
-  const [pendingMission, setPendingMission] = useState<Mission | null>(null);
-  const [missionPlanBusy, setMissionPlanBusy] = useState(false);
   const [planBusy, setPlanBusy] = useState(false);
-  const [activeMission, setActiveMission] = useState<Mission | null>(null);
-  const missionCancelledRef = useRef(false);
 
   const [groups, setGroups] = useState<AgentGroup[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
@@ -154,6 +147,7 @@ export default function HomePage() {
 
   const [toolNeed, setToolNeed] = useState<ToolNeed | null>(null);
   const [pendingTaskAfterConnect, setPendingTaskAfterConnect] = useState<string | null>(null);
+  const [capabilityNeed, setCapabilityNeed] = useState<"browser" | "computer" | null>(null);
 
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [chatId, setChatId] = useState<string | null>(null);
@@ -165,6 +159,8 @@ export default function HomePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [workingLabel, setWorkingLabel] = useState<string | null>(null);
+  const [livePreviewUrl, setLivePreviewUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [chatFullscreen, setChatFullscreen] = useState(false);
@@ -206,6 +202,18 @@ export default function HomePage() {
       router.push("/login");
     }
   }, [loading, user, router]);
+
+  async function refreshToolState() {
+    if (!user) return;
+    const [toolIds, servers, intKeys] = await Promise.all([
+      listConnectedPluginIds(user.uid),
+      listMCPServers(user.uid),
+      getIntegrationKeys(user.uid),
+    ]);
+    setConnectedToolIds(toolIds);
+    setMcpServers(servers);
+    setIntegrationKeys(intKeys);
+  }
 
   async function refreshChats() {
     if (!user) return;
@@ -262,6 +270,13 @@ export default function HomePage() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    const sync = () => refreshToolState().catch(() => undefined);
+    const interval = window.setInterval(sync, 8000);
+    return () => window.clearInterval(interval);
   }, [user]);
 
   useEffect(() => {
@@ -356,7 +371,7 @@ export default function HomePage() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages, sending, pendingPlan, activeMission]);
+  }, [messages, sending, pendingPlan]);
 
   useEffect(() => {
     if (!user || !chatId || !telegram?.botUsername) return;
@@ -423,8 +438,6 @@ export default function HomePage() {
     setCeoMode(false);
     setToolNeed(null);
     setPendingPlan(null);
-    setPendingMission(null);
-    setActiveMission(null);
     setActiveGroupId(null);
     setActiveChatGroup(null);
     setActiveProviderId(connected?.id ?? null);
@@ -444,8 +457,6 @@ export default function HomePage() {
     setActiveGroupId(chat.groupId ?? null);
     setToolNeed(null);
     setPendingPlan(null);
-    setPendingMission(null);
-    setActiveMission(null);
     setGreeting(null);
     setError(null);
   }
@@ -530,10 +541,10 @@ export default function HomePage() {
     }
   }
 
-  async function handleStartBrowser() {
+  async function handleStartBrowser(profileName?: string) {
     setBrowserStarting(true);
     try {
-      const { sessionId, liveUrl } = await startBrowserSession();
+      const { sessionId, liveUrl } = await startBrowserSession(profileName);
       setBrowserSessionId(sessionId);
       setBrowserLiveUrl(liveUrl || null);
     } catch (err) {
@@ -675,94 +686,6 @@ export default function HomePage() {
     }
   }
 
-  // ---------- Mission lifecycle (Phase 2 + Phase 4: real parallel DAG) ----------
-  async function launchMission(mission: Mission, targetChatId: string) {
-    if (!activeConnection || !user) return;
-    missionCancelledRef.current = false;
-    setActiveMission(mission);
-    const { provider, apiKey: activeKey, model } = activeConnection;
-
-    let liveMessages = messages;
-
-    const final = await runMission({
-      uid: user.uid,
-      providerId: provider.id,
-      apiKey: activeKey,
-      mission,
-      hasBrowser: !!integrationKeys.browserlessApiKey,
-      hasComputer: !!integrationKeys.daytonaApiKey,
-      model,
-      onUpdate: (m) => setActiveMission(m),
-      onStep: (s) => setAgentStatus(s),
-      isCancelled: () => missionCancelledRef.current,
-      onSubtaskMessage: async (msg) => {
-        liveMessages = [...liveMessages, msg];
-        setMessages(liveMessages);
-        await persist(liveMessages, targetChatId, activeAgent?.id, provider.id);
-      },
-      onPluginAction: async (taskForPlugin) => {
-        const availableToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
-        const planned = await decidePluginAction(
-          provider.id,
-          activeKey,
-          liveMessages,
-          availableToolIds,
-          model
-        );
-        if (!planned) return null;
-        setUsingPluginAction(planned.actionName);
-        try {
-          return await callPluginAction(planned.toolId, planned.actionId, planned.params);
-        } finally {
-          setUsingPluginAction(null);
-        }
-      },
-    });
-    setAgentStatus(null);
-    if (final.summary) {
-      liveMessages = [...liveMessages, { role: "assistant", content: final.summary }];
-      setMessages(liveMessages);
-      await persist(liveMessages, targetChatId, activeAgent?.id, provider.id);
-    }
-  }
-
-  async function handleApproveMission() {
-    if (!pendingMission) return;
-    setMissionPlanBusy(true);
-    const approved = { ...pendingMission, status: "running" as const };
-    setPendingMission(null);
-    setActiveMission(approved);
-    await updateMission(user!.uid, approved.id, { status: "running" });
-    await launchMission(approved, approved.chatId);
-    setMissionPlanBusy(false);
-  }
-
-  async function handleCancelMissionPlan() {
-    if (!pendingMission || !user) return;
-    await updateMission(user.uid, pendingMission.id, { status: "cancelled" });
-    setPendingMission(null);
-    setActiveMission({ ...pendingMission, status: "cancelled" });
-    const cancelMsg: ChatMessage = { role: "assistant", content: "Okay — I won't run that mission." };
-    const finalMessages = [...messages, cancelMsg];
-    setMessages(finalMessages);
-    await persist(finalMessages, pendingMission.chatId, activeAgent?.id, activeConnection?.provider.id);
-  }
-
-  function handleCancelMission() {
-    missionCancelledRef.current = true;
-  }
-
-  async function handleResumeMission(mission: Mission) {
-    setMissionsOpen(false);
-    if (mission.chatId !== chatId) await handleSelectChat(mission.chatId);
-    setActiveMission(mission);
-    if (mission.status === "waiting_for_user") {
-      setPendingMission(mission);
-      return;
-    }
-    await launchMission(mission, mission.chatId);
-  }
-
   async function processTask(task: string, attachments: Attachment[] = []) {
     if (!activeConnection || !user) {
       setForceSelect(true);
@@ -788,8 +711,6 @@ export default function HomePage() {
     setGreeting(null);
     setToolNeed(null);
     setPendingPlan(null);
-    setPendingMission(null);
-    setActiveMission(null);
 
     let currentChatId = chatId;
     if (!currentChatId) {
@@ -816,55 +737,19 @@ export default function HomePage() {
 
     const effectiveToolIds = effectiveConnectedToolIds(connectedToolIds, mcpServers);
     const need = await detectToolNeed(provider.id, activeKey, nextMessages, effectiveToolIds, model);
-    if (need && !need.connected) {
+    const browserCanFallback = !!integrationKeys.browserlessApiKey && /email|gmail|outlook|mail/i.test(need?.toolName || "");
+    if (need && !need.connected && !browserCanFallback) {
       setToolNeed(need);
       setPendingTaskAfterConnect(task);
       await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
       return;
     }
 
-    // "Continue" — resume the latest unfinished mission for this chat.
-    const continueDecision = await decideContinueIntent(provider.id, activeKey, task, model);
-    if (continueDecision.wantsContinue) {
-      const resumable = await findResumableMission(user.uid, currentChatId);
-      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
-      if (resumable) {
-        await launchMission(resumable, currentChatId);
-      } else {
-        const noMissionMsg: ChatMessage = { role: "assistant", content: "I don't see an unfinished mission for this chat to continue." };
-        const finalMessages = [...nextMessages, noMissionMsg];
-        setMessages(finalMessages);
-        await persist(finalMessages, currentChatId, activeAgent?.id, provider.id);
-      }
-      return;
-    }
-
-    // Route the task to a specialist before creating a mission so the UI
-    // always shows the chosen agent even for multi-step work. The selected
-    // agent is context; the mission runtime still owns actual tool execution.
+    // Route every task to a specialist before execution so the UI and runtime stay synchronized.
     setClassifying(true);
     const selectedAgent = await classifyAgent(provider.id, activeKey, task, model);
     setClassifying(false);
     setActiveAgent(selectedAgent);
-
-    // Genuinely multi-step objective → tracked Mission with a real
-    // dependency graph, instead of a one-shot reply.
-    const missionDecision = await decideMissionIntent(
-      provider.id,
-      activeKey,
-      task,
-      model,
-      { hasBrowser: !!integrationKeys.browserlessApiKey, hasComputer: !!integrationKeys.daytonaApiKey }
-    );
-    if (missionDecision.isMission) {
-      const mission = await createMission(user.uid, currentChatId, task, missionDecision.subtasks, selectedAgent.id);
-      const waitingMission = { ...mission, status: "waiting_for_user" as const };
-      setActiveMission(waitingMission);
-      setPendingMission(waitingMission);
-      await updateMission(user.uid, mission.id, { status: "waiting_for_user" });
-      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
-      return;
-    }
 
     const myConnectedAgents = agentConnections
       .filter((c) => c.sourceChatId === currentChatId)
@@ -881,22 +766,33 @@ export default function HomePage() {
       model
     );
 
+    if (autoDecision.browserUnavailable) {
+      setCapabilityNeed("browser");
+      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
+      return;
+    }
+    if (autoDecision.computerUnavailable) {
+      setCapabilityNeed("computer");
+      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
+      return;
+    }
+
     if (autoDecision.installSkillUrl) {
-      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
       await handleAutoInstallSkill(autoDecision.installSkillUrl, nextMessages, currentChatId);
       return;
     }
 
-    if (autoDecision.needsBrowser || autoDecision.needsComputer) {
+    const needsRealWork = autoDecision.needsBrowser || autoDecision.needsComputer || /\b(build|create|make|develop|code|website|app|game|deploy|edit|fix|debug|send|reply|post|book|schedule)\b/i.test(task);
+    if (needsRealWork) {
       const toolsSummary = [
-        autoDecision.needsBrowser ? "a real web browser (navigate, click, type, read pages)" : null,
-        autoDecision.needsComputer ? "a real cloud desktop computer" : null,
-      ]
-        .filter(Boolean)
-        .join(" and ");
+        autoDecision.needsBrowser ? "a real web browser" : null,
+        autoDecision.needsComputer ? "a persistent cloud computer + terminal" : null,
+        !autoDecision.needsBrowser && !autoDecision.needsComputer ? "the agent workspace, files, terminal and connected tools" : null,
+      ].filter(Boolean).join(" and ");
       const plan = await generateTaskPlan(provider.id, activeKey, task, toolsSummary, model);
-      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
-      if (plan) {
+      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
+      if (plan?.steps?.length) {
         setPendingPlan({ task, attachments, autoDecision, steps: plan.steps, chatId: currentChatId });
         return;
       }
@@ -913,11 +809,27 @@ export default function HomePage() {
   ) {
     if (!activeConnection || !user) return;
     const { provider, apiKey: activeKey, model } = activeConnection;
+    setWorkingLabel("Working on your request…");
     const nextMessages = messages.some((m) => m.role === "user" && m.content === task)
       ? messages
       : [...messages, { role: "user" as const, content: task, ...(attachments.length ? { attachments } : {}) }];
 
     let toolResultNote = "";
+    let externalToolHandled = false;
+
+    if (activeAgent?.id === "developer" && looksLikeDeveloperTask(task)) {
+      setAgentStatus("💻 Developer Agent: terminal → build → preview → verify");
+      try {
+        const dev = await runDeveloperWorkspace(provider.id, activeKey, task, model, nextMessages, (step) => setAgentStatus(`💻 ${step}`));
+        setLivePreviewUrl(dev.previewUrl || null);
+        setCodespaceOpen(true);
+        toolResultNote += `\n\nREAL DEVELOPER WORKSPACE RESULT:\nChanged files: ${dev.changedFiles.join(", ")}\nBuild: ${dev.buildOk ? "PASS" : "FAIL"}\n${dev.buildOutput.slice(-10000)}${dev.previewUrl ? `\nLive preview: ${dev.previewUrl}` : ""}\n\nDo not claim more than this evidence proves.`;
+      } catch (err) {
+        toolResultNote += `\n\nREAL DEVELOPER WORKSPACE FAILURE: ${err instanceof Error ? err.message : String(err)}\nDo not claim the build succeeded.`;
+      } finally {
+        setAgentStatus(null);
+      }
+    }
 
     if (mcpServers.length > 0) {
       const toolCall = await decideMcpToolCall(provider.id, activeKey, nextMessages, mcpServers, model);
@@ -925,6 +837,7 @@ export default function HomePage() {
         setUsingMcpTool(toolCall.toolName);
         try {
           const result = await callMcpTool(toolCall.serverId, toolCall.toolName, toolCall.arguments);
+          externalToolHandled = true;
           toolResultNote = `You just used the "${toolCall.toolName}" tool and got this result:\n${result}\n\nIncorporate this into your reply to the user naturally — don't just repeat it verbatim, explain what it means.`;
         } catch (err) {
           toolResultNote = `You attempted to use the "${toolCall.toolName}" tool but the call failed: ${
@@ -935,12 +848,13 @@ export default function HomePage() {
       }
     }
 
-    if (effectiveConnectedToolIds(connectedToolIds, mcpServers).length > 0) {
+    if (!externalToolHandled && effectiveConnectedToolIds(connectedToolIds, mcpServers).length > 0) {
       const planned = await decidePluginAction(provider.id, activeKey, nextMessages, connectedToolIds, model);
       if (planned) {
         setUsingPluginAction(planned.actionName);
         try {
           const result = await callPluginAction(planned.toolId, planned.actionId, planned.params);
+          externalToolHandled = true;
           toolResultNote += `\n\nYou just used "${planned.actionName}" for real and got this result:\n${result}\n\nTell the user what happened, referencing the real outcome above.`;
         } catch (err) {
           toolResultNote += `\n\nYou attempted "${planned.actionName}" but it failed: ${
@@ -972,7 +886,16 @@ export default function HomePage() {
       setAgentStatus("🌐 Starting the browser...");
       const recovery = await withRecovery(`browser:${user.uid}`, async () => {
         if (!sid) {
-          const started = await startBrowserSession();
+          let selectedProfile: string | undefined;
+          if (/email|gmail|outlook|mail/i.test(task)) {
+            const profiles = await listBrowserProfiles().catch(() => []);
+            const matching = profiles.find((p) => /gmail|mail|outlook|email/i.test(p.name));
+            if (matching) selectedProfile = matching.name;
+            else if (profiles.length === 0) {
+              throw new Error("LOGIN_PROFILE_REQUIRED: No Browserless authenticated profile is available for this email task. Connect Gmail through Plugins/MCP or create a Browserless authenticated profile.");
+            }
+          }
+          const started = await startBrowserSession(selectedProfile);
           sid = started.sessionId;
           setBrowserSessionId(sid);
           setBrowserLiveUrl(started.liveUrl || null);
@@ -1055,7 +978,7 @@ export default function HomePage() {
       agentConnections.some((c) => c.sourceChatId === currentChatId)
         ? "You have other agents connected that you can consult when the user explicitly wants their input."
         : null,
-      "For genuinely multi-step objectives (multiple independent pieces of research, a build-and-deploy, etc.), you track it as a Mission — a real dependency graph where independent parts run in parallel — with retry and verification per step, resumable if interrupted.",
+      "For multi-step objectives, work through the normal agent loop: plan → approval → execute with real tools → verify. Never claim completion without evidence.",
     ]
       .filter(Boolean)
       .join("\n");
@@ -1086,6 +1009,7 @@ export default function HomePage() {
         setError(err instanceof Error ? err.message : "The group failed to complete the task.");
       } finally {
         setSending(false);
+        setWorkingLabel(null);
       }
       return;
     }
@@ -1126,12 +1050,14 @@ export default function HomePage() {
       setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setSending(false);
+      setWorkingLabel(null);
     }
   }
 
   async function handleApprovePlan() {
     if (!pendingPlan) return;
     setPlanBusy(true);
+    setWorkingLabel("Starting the approved work…");
     const { task, attachments, autoDecision, chatId: targetChatId } = pendingPlan;
     setPendingPlan(null);
     await executeTask(task, attachments, targetChatId, autoDecision);
@@ -1178,7 +1104,6 @@ export default function HomePage() {
           onOpenSkills={() => setSkillsOpen(true)}
           onOpenPricing={() => setPricingOpen(true)}
           onOpenConnections={() => setConnectionsOpen(true)}
-          onOpenMissions={() => setMissionsOpen(true)}
           onLogout={() => signOut(auth)}
         />
       )}
@@ -1365,18 +1290,11 @@ export default function HomePage() {
                 />
               ))}
 
-              {pendingMission && pendingMission.chatId === chatId && (
-                <PlanApprovalCard
-                  steps={pendingMission.subtasks.map((s) => `${s.workerType}: ${s.description}`)}
-                  onApprove={handleApproveMission}
-                  onCancel={handleCancelMissionPlan}
-                  busy={missionPlanBusy}
-                />
+              {capabilityNeed && (
+                <CapabilityConnectPrompt kind={capabilityNeed} onSettings={() => { setCapabilityNeed(null); setSettingsOpen(true); }} />
               )}
 
-              {activeMission && activeMission.chatId === chatId && (
-                <MissionCard mission={activeMission} onCancel={pendingMission ? undefined : handleCancelMission} />
-              )}
+              {workingLabel && <WorkingCard label={workingLabel} agentName={activeAgent?.name} onStop={() => setWorkingLabel(null)} />}
 
               {pendingPlan && ( 
                 <PlanApprovalCard
@@ -1523,7 +1441,7 @@ export default function HomePage() {
         onClose={async () => {
           setMcpOpen(false);
           setMcpPrefill(null);
-          setMcpServers(await listMCPServers(user.uid));
+          await refreshToolState();
         }}
       />
       <BusinessDNAPanel
@@ -1556,9 +1474,9 @@ export default function HomePage() {
           onSave={handleSaveAgentIdentity}
         />
       )}
-      <MissionsPanel uid={user.uid} open={missionsOpen} onClose={() => setMissionsOpen(false)} onResume={handleResumeMission} />
       <CloudWorkspacePanel open={cloudWorkspaceOpen} onClose={() => setCloudWorkspaceOpen(false)} />
       <CodespacePanel
+        livePreviewUrl={livePreviewUrl}
         open={codespaceOpen}
         onClose={() => {
           setCodespaceOpen(false);
