@@ -53,30 +53,36 @@ async function refreshReconnectEndpoint(browser: Browser, apiKey: string): Promi
   return `${browserWSEndpoint}?token=${apiKey}`;
 }
 
-export async function startBrowserSession(uid: string, apiKey: string): Promise<{ sessionId: string; liveUrl: string }> {
-  const browser = await puppeteer.connect({ browserWSEndpoint: `wss://${REGION}/?token=${apiKey}` });
+export async function startBrowserSession(uid: string, apiKey: string, profileName?: string): Promise<{ sessionId: string; liveUrl: string; profileName?: string }> {
+  const profile = profileName ? `&profile=${encodeURIComponent(profileName)}` : "";
+  const browser = await puppeteer.connect({ browserWSEndpoint: `wss://${REGION}/?token=${apiKey}${profile}` });
 
   const reconnectEndpoint = await refreshReconnectEndpoint(browser, apiKey);
-  const browserId = reconnectEndpoint.split("?")[0].split("/").pop()!;
-
   const sessionId = crypto.randomUUID();
   await saveSession(uid, sessionId, reconnectEndpoint);
 
-  // Live view needs your Browserless plan to support interactable
-  // sessions — if it's not available, don't block the session at all.
-  // The agent can still fully browse, click, type, and read pages
-  // without anyone watching; only the visual preview is missing.
+  // Browserless' current live-view API is a CDP extension. The old
+  // /browser/:id/live call could return an unusable/empty viewer URL, which
+  // made the Browser button look broken even though automation worked.
   let liveUrl = "";
   try {
-    const liveRes = await fetch(`https://${REGION}/browser/${browserId}/live?token=${apiKey}`, { method: "POST" });
-    const liveData = await liveRes.json().catch(() => null);
-    liveUrl = liveData?.liveURL || liveData?.url || liveData?.liveUrl || "";
+    const page = (await browser.pages())[0] || (await browser.newPage());
+    const cdp = await page.createCDPSession();
+    const live = (await cdp.send("Browserless.liveURL" as any, {
+      timeout: SESSION_TIMEOUT_MS,
+      interactable: true,
+      resizable: true,
+      showBrowserInterface: true,
+      quality: 70,
+      type: "jpeg",
+    } as any)) as { error?: string; liveURL?: string };
+    if (!live.error) liveUrl = live.liveURL || "";
   } catch {
-    // live view is best-effort
+    // Live view is best-effort; the agent can still automate the browser.
   }
 
   await browser.disconnect();
-  return { sessionId, liveUrl };
+  return { sessionId, liveUrl, profileName };
 }
 
 export async function runBrowserAction(
