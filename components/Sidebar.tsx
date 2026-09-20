@@ -16,7 +16,6 @@ type Props = {
   onOpenSkills: () => void;
   onOpenPricing: () => void;
   onOpenConnections: () => void;
-  onOpenMissions: () => void;
   onLogout: () => void;
   chats: ChatSummary[];
   groups: ChatGroup[];
@@ -38,7 +37,6 @@ export default function Sidebar({
   onOpenSkills,
   onOpenPricing,
   onOpenConnections,
-  onOpenMissions,
   onLogout,
   chats,
   groups,
@@ -76,7 +74,6 @@ export default function Sidebar({
         <NavItem icon={<ConnectionIcon />} label="Connections" onClick={onOpenConnections} />
         <NavItem icon={<BusinessIcon />} label="Business DNA" onClick={onOpenBusinessDNA} />
         <NavItem icon={<PlanIcon />} label="Plans" onClick={onOpenPricing} />
-        <NavItem icon={<MissionIcon />} label="Missions" onClick={onOpenMissions} />
       </div>
 
       {groups.length > 0 && (
@@ -208,14 +205,6 @@ function PlanIcon() {
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
       <rect x="2" y="3" width="11" height="9" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
       <path d="M2 6h11" stroke="currentColor" strokeWidth="1.2" />
-    </svg>
-  );
-}
-function MissionIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
-      <circle cx="7.5" cy="7.5" r="5.5" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="7.5" cy="7.5" r="2" stroke="currentColor" strokeWidth="1.2" />
     </svg>
   );
 }
