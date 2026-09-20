@@ -107,6 +107,26 @@ export async function workspacePreview(uid: string, port: number) {
   return { sandboxId: state.sandboxId, port, url: signed.url };
 }
 
+export async function workspaceListFiles(uid: string, includeContent = false) {
+  const state = await ensureWorkspace(uid);
+  const daytona = await getDaytona(uid);
+  const sandbox = await daytona.get(state.sandboxId);
+  const findExpr = "find workspace -type f -not -path '*/node_modules/*' -not -path '*/.git/*' \\\( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' -o -name '*.json' -o -name '*.css' -o -name '*.html' -o -name '*.md' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.py' -o -name '*.sql' \\\)";
+  if (!includeContent) {
+    const result = await sandbox.process.executeCommand(`${findExpr} -print | sort`, undefined, undefined, 60);
+    const output = result.result || result.artifacts?.stdout || "";
+    return { files: output.split(/\r?\n/).filter(Boolean).map((path) => ({ path: path.replace(/^workspace\//, "") })) };
+  }
+  const result = await sandbox.process.executeCommand(`${findExpr} -print0 | xargs -0 -r -n1 sh -c 'printf "FILE:%s\\n" "$0"; cat "$0"; printf "\\n---AV_FILE_END---\\n"'`, undefined, undefined, 60);
+  const output = result.result || result.artifacts?.stdout || "";
+  const files: { path: string; content: string }[] = [];
+  for (const chunk of output.split(/---AV_FILE_END---/)) {
+    const match = chunk.match(/^FILE:(.+?)\n([\s\S]*)$/);
+    if (match) files.push({ path: match[1].replace(/^workspace\//, "").trim(), content: match[2].replace(/\n$/, "") });
+  }
+  return { files };
+}
+
 export async function workspaceDelete(uid: string) {
   const stored = await getStored(uid);
   if (!stored?.sandboxId) return;
