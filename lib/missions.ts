@@ -34,13 +34,14 @@ export type Mission = {
   status: MissionStatus;
   artifacts: string[];
   summary?: string;
+  agentId?: string;
   createdAt: number;
   updatedAt: number;
 };
 
 export type SubtaskDraft = { description: string; dependsOnIndexes: number[]; workerType: WorkerType };
 
-export async function createMission(uid: string, chatId: string, objective: string, drafts: SubtaskDraft[]): Promise<Mission> {
+export async function createMission(uid: string, chatId: string, objective: string, drafts: SubtaskDraft[], agentId?: string): Promise<Mission> {
   const ids = drafts.map((_, i) => `s${i + 1}`);
   const subtasks: MissionSubtask[] = drafts.map((d, i) => ({
     id: ids[i],
@@ -57,6 +58,7 @@ export async function createMission(uid: string, chatId: string, objective: stri
     subtasks,
     status: "running",
     artifacts: [],
+    ...(agentId ? { agentId } : {}),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
