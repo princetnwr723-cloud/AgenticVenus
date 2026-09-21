@@ -159,13 +159,19 @@ async function callAnthropic(
     },
     body: JSON.stringify({
       model: model || "claude-sonnet-5",
-      max_tokens: 1024,
+      // 1024 used to cut the Developer Agent's files off mid-way.
+      max_tokens: 8192,
       ...(systemPrompt ? { system: systemPrompt } : {}),
       messages: toAnthropicMessages(messages),
     }),
   });
   const data = await parseOrThrow(res);
-  const text = data?.content?.[0]?.text ?? "(empty response)";
+  // Join every text block (the first block isn't always the text one).
+  const text =
+    (data?.content || [])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("") || "(empty response)";
   const usage = data?.usage
     ? {
         inputTokens: data.usage.input_tokens ?? 0,
