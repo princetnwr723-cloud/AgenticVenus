@@ -9,9 +9,9 @@
 import { useState } from "react";
 import type { ChatMessage as ChatMessageType } from "@/lib/chatClient";
 import { renderMarkdown } from "@/lib/markdown";
+import { splitMessageParts } from "@/lib/codeExtract";
 import CodeFileCard from "@/components/CodeFileCard";
 import AnimatedAvatar from "@/components/AnimatedAvatar";
-import type { CodeFile } from "@/lib/codeExtract";
 import type { AgentIdentity } from "@/lib/agentIdentity";
 
 type Props = {
@@ -20,37 +20,6 @@ type Props = {
   onOpenFile?: (fileId: string) => void;
   agentIdentity?: AgentIdentity | null;
 };
-
-type MessagePart =
-  | { type: "text"; content: string }
-  | { type: "file"; file: CodeFile };
-
-const FENCE_RE = /```(\w+)?\n([\s\S]*?)```/g;
-
-function splitTextAndCode(content: string): MessagePart[] {
-  const parts: MessagePart[] = [];
-  let lastIndex = 0;
-  let autoIndex = 0;
-  let match: RegExpExecArray | null;
-
-  FENCE_RE.lastIndex = 0;
-  while ((match = FENCE_RE.exec(content)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push({ type: "text", content: content.slice(lastIndex, match.index) });
-    }
-    const language = match[1] || "text";
-    const body = match[2].trim();
-    const firstLine = body.split("\n")[0];
-    const filenameMatch = firstLine.match(/filename:\s*(\S+)/i);
-    const filename = filenameMatch ? filenameMatch[1] : `snippet-${++autoIndex}.${language}`;
-    const code = filenameMatch ? body.split("\n").slice(1).join("\n") : body;
-    parts.push({ type: "file", file: { id: filename, filename, language, code } });
-    lastIndex = match.index + match[0].length;
-  }
-  if (lastIndex < content.length) parts.push({ type: "text", content: content.slice(lastIndex) });
-  if (parts.length === 0) parts.push({ type: "text", content });
-  return parts;
-}
 
 export function ChatMessageItem({ message, onEdit, onOpenFile, agentIdentity }: Props) {
   const [copied, setCopied] = useState(false);
@@ -98,7 +67,7 @@ export function ChatMessageItem({ message, onEdit, onOpenFile, agentIdentity }: 
     );
   }
 
-  const parts = splitTextAndCode(message.content);
+  const parts = splitMessageParts(message.content);
   const avatarSeed = message.agentName ? message.agentName : agentIdentity?.avatarSeed || "a1";
   const displayName = message.agentName || agentIdentity?.name;
 
