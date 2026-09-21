@@ -4,6 +4,8 @@ import {
   ensureWorkspace,
   workspaceExec,
   workspaceSessionExec,
+  workspaceSessionLogs,
+  workspaceListeningPorts,
   workspaceWriteFile,
   workspaceReadFile,
   workspacePreview,
@@ -28,6 +30,8 @@ export async function POST(req: NextRequest) {
     if (action === "ensure") return NextResponse.json({ ok: true, workspace: await ensureWorkspace(uid) });
     if (action === "exec") return NextResponse.json({ ok: true, result: await workspaceExec(uid, body.command, body.cwd, body.timeout) });
     if (action === "sessionExec") return NextResponse.json({ ok: true, result: await workspaceSessionExec(uid, body.sessionId || "agenticvenus-terminal", body.command, !!body.runAsync) });
+    if (action === "sessionLogs") return NextResponse.json({ ok: true, result: await workspaceSessionLogs(uid, body.sessionId, body.cmdId) });
+    if (action === "ports") return NextResponse.json({ ok: true, ...(await workspaceListeningPorts(uid)) });
     if (action === "write") return NextResponse.json({ ok: true, result: await workspaceWriteFile(uid, body.path, body.content) });
     if (action === "read") return NextResponse.json({ ok: true, result: await workspaceReadFile(uid, body.path) });
     if (action === "preview") return NextResponse.json({ ok: true, result: await workspacePreview(uid, Number(body.port || 3000)) });
@@ -38,7 +42,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error("[api/workspace]", err);
     const message = err instanceof Error ? err.message : "Workspace operation failed.";
-    const status = message.includes("Missing auth") || message.includes("auth/id-token") ? 401 : 500;
+    const status = message.includes("Missing auth") || message.includes("auth/id-token") ? 401 : message.startsWith("NO_DAYTONA") ? 400 : 500;
     return NextResponse.json({ error: message }, { status });
   }
 }
