@@ -1511,6 +1511,7 @@ export default function HomePage() {
       <CloudWorkspacePanel open={cloudWorkspaceOpen} onClose={() => setCloudWorkspaceOpen(false)} />
       <CodespacePanel
         livePreviewUrl={livePreviewUrl}
+        agentBusy={!!agentStatus && agentStatus.includes("💻")}
         open={codespaceOpen}
         onClose={() => {
           setCodespaceOpen(false);
