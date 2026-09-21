@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebaseAdmin";
 import { telegramSendMessage } from "@/lib/telegramApi";
+import { decryptSecret } from "@/lib/secretsVault";
 import type { ChatMessage } from "@/lib/chatClient";
 import { detectScheduleIntent } from "@/lib/scheduleDetect";
 import { addScheduledTask, nextOccurrence } from "@/lib/scheduler";
@@ -43,10 +44,12 @@ export async function POST(
     let apiKey: string | undefined;
     let model: string | undefined;
 
+    // Provider keys are stored encrypted (apiKey_enc) — decrypt, don't read a plain `apiKey`.
     if (providerId) {
       const connSnap = await db.collection("users").doc(uid).collection("connections").doc(providerId).get();
       if (connSnap.exists) {
-        apiKey = connSnap.data()?.apiKey;
+        const enc = connSnap.data()?.apiKey_enc;
+        apiKey = enc ? decryptSecret(enc) : undefined;
         model = connSnap.data()?.model;
       }
     }
@@ -55,7 +58,7 @@ export async function POST(
       if (!connsSnap.empty) {
         const d = connsSnap.docs[0].data();
         providerId = d.providerId;
-        apiKey = d.apiKey;
+        apiKey = d.apiKey_enc ? decryptSecret(d.apiKey_enc) : undefined;
         model = d.model;
       }
     }
