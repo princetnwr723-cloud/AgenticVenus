@@ -1,13 +1,16 @@
 // lib/pluginOrchestrator.ts
-// Client-side glue: starts the real "Continue with X" login for a
-// plugin, and — once connected — uses the AI itself to decide whether
-// the CONVERSATION (not just the latest message) needs a real plugin
-// action, then calls it. Using full context here is what fixes
-// follow-ups like "now send it" after a draft was discussed earlier.
+// Client-side glue: starts the real "Continue with X" login for a plugin, and —
+// once connected — uses the AI itself to decide whether the CONVERSATION (not
+// just the latest message) needs a real plugin action, then calls it.
+//
+// Using full context here is what makes follow-ups like "now send it" work, and
+// the tool-result feedback loop in app/home/page.tsx lets the agent chain
+// actions (list channels → post message, search Drive → read file, …).
 
 import { auth } from "@/lib/firebase";
 import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
-import { PLUGIN_ACTIONS } from "@/lib/pluginActions";
+import { parseFirstJson } from "@/lib/agentJson";
+import { PLUGIN_ACTIONS } from "@/lib/pluginCatalog";
 
 async function authedHeaders() {
   const idToken = await auth.currentUser?.getIdToken();
@@ -48,15 +51,10 @@ export type PlannedPluginAction = {
   params: Record<string, any>;
 };
 
-function extractJson(text: string): string {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  return (fenced ? fenced[1] : text).trim();
-}
-
-function transcript(messages: ChatMessage[], turns = 8): string {
+function transcript(messages: ChatMessage[], turns = 10): string {
   return messages
     .slice(-turns)
-    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content.slice(0, m.content.startsWith("[REAL TOOL") ? 4000 : 1800)}`)
     .join("\n");
 }
 
@@ -71,10 +69,34 @@ export async function decidePluginAction(
   if (available.length === 0) return null;
 
   const catalog = available
-    .map((a) => `actionId: ${a.id} | name: ${a.name} | description: ${a.description} | params: ${JSON.stringify(a.params)}`)
+    .map(
+      (a) =>
+        `- ${a.id} [${a.write ? "WRITE" : "read"}] ${a.description} params: ${JSON.stringify(a.params)}`
+    )
     .join("\n");
 
-  const prompt = `You have access to these real connected actions:\n${catalog}\n\nConversation so far (use this for context — a short follow-up like "send it" or "yes do it" refers back to details discussed earlier):\n${transcript(messages)}\n\nDecide if one of these actions should run for real right now, based on the latest USER request plus any REAL TOOL RESULTS already recorded. Reply with ONLY raw JSON:\n{"useAction": boolean, "actionId": "matching id or null", "params": {"...": "values inferred from the whole conversation, not just the last line"}}\n\nIf none fit, reply {"useAction": false, "actionId": null, "params": {}}. Only pick an action the user actually asked for right now, and do not repeat an action that the transcript already shows succeeded — e.g. don't send an email unless they clearly asked to send (creating a draft is safer if they only asked you to "write" or "draft" something).`;
+  let timeZone = "UTC";
+  try {
+    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {}
+  const now = new Date();
+
+  const prompt = `You can call these REAL connected actions:
+${catalog}
+
+Current date/time: ${now.toISOString()} (user's time zone: ${timeZone}). Resolve words like "tomorrow" or "next Monday" into concrete ISO date-times yourself.
+
+Conversation so far (a short follow-up such as "send it" or "yes do it" refers to details discussed earlier; lines starting with [REAL TOOL RESULT] are results of actions already run):
+${transcript(messages)}
+
+Decide whether ONE of these actions should run right now, based on the latest USER request plus any [REAL TOOL RESULT] lines.
+Rules:
+- Only use an action the user actually asked for. Never repeat an action the transcript shows already succeeded.
+- WRITE actions (send / create / post) only when the user clearly asked to do that. If they only asked to "write" or "draft" something, prefer a draft action, or none.
+- If you need an id you don't have (a channel id, message id, file id, team id, chat id), run the matching list/search action first.
+- Once the tool results already contain everything needed to answer, choose no action.
+Reply with ONLY raw JSON:
+{"useAction": boolean, "actionId": "id from the list or null", "params": {"param": "value inferred from the whole conversation"}}`;
 
   try {
     const { text } = await sendChatMessage({
@@ -83,7 +105,7 @@ export async function decidePluginAction(
       messages: [{ role: "user", content: prompt }],
       model,
     });
-    const parsed = JSON.parse(extractJson(text));
+    const parsed = parseFirstJson<{ useAction?: boolean; actionId?: string; params?: Record<string, any> }>(text);
     if (!parsed?.useAction || !parsed.actionId) return null;
 
     const action = available.find((a) => a.id === parsed.actionId);
