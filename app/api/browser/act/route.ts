@@ -3,7 +3,8 @@ import { adminAuth } from "@/lib/firebaseAdmin";
 import { resolveIntegrationSecret } from "@/lib/secretsResolve";
 import { runBrowserAction, type BrowserAction } from "@/lib/browserUse";
 
-export const maxDuration = 30;
+// A page load + settle + screenshot + element scan can take longer than 30s.
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   try {
