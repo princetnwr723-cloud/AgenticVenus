@@ -14,7 +14,7 @@ import { detectScheduleIntent } from "@/lib/scheduleDetect";
 import { decideAutoTools } from "@/lib/autoTools";
 import { decideMcpToolCall } from "@/lib/mcpOrchestrator";
 import { mcpCallTool } from "@/lib/mcpClient";
-import { executePluginAction, PLUGIN_ACTIONS } from "@/lib/pluginActions";
+import { runPluginAction } from "@/lib/pluginRuntime";
 import { connectedToolNames, effectiveConnectedToolIds } from "@/lib/pluginConnections";
 import { startBrowserSession, runBrowserAction, stopBrowserSession, type BrowserAction } from "@/lib/browserUse";
 import { startComputer, runComputerAction, stopComputer, type ComputerAction } from "@/lib/computerUse";
@@ -150,9 +150,8 @@ export async function runAutonomousReply(
     const planned = await decidePluginAction(providerId, apiKey, messages, connectedToolIds, model);
     if (planned) {
       try {
-        const connSnap = await adminDb().collection("users").doc(uid).collection("pluginConnections").doc(planned.toolId).get();
-        const conn = connSnap.exists ? connSnap.data()! : null;
-        const result = await executePluginAction(planned.actionId, conn?.accessToken, planned.params);
+        // Decrypts + refreshes the stored token/key, then runs the action.
+        const result = await runPluginAction(uid, planned.toolId, planned.actionId, planned.params);
         toolResultNote += `\n\nYou just used "${planned.actionName}" for real:\n${result}`;
       } catch (err) {
         toolResultNote += `\n\nYou attempted "${planned.actionName}" but it failed: ${err instanceof Error ? err.message : "unknown error"}.`;
