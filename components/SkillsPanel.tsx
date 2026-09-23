@@ -1,9 +1,10 @@
 "use client";
 
 // components/SkillsPanel.tsx
-// Browse and install skills — catalog ones, or imported from a SKILL.md
-// link. Custom skills can be expanded to see the full stored content,
-// so you can verify exactly what the agent will follow.
+// Browse and install skills — catalog ones, imported from a SKILL.md link,
+// or found via the new "Find skills" search (uses the real web-search
+// plugin to locate public SKILL.md files, then runs them through the same
+// fetch-and-parse import as pasting a link).
 
 import { useEffect, useState } from "react";
 import SlideOverPanel from "@/components/SlideOverPanel";
@@ -13,6 +14,9 @@ import { listCustomSkills, saveCustomSkill, deleteCustomSkill } from "@/lib/cust
 import { importSkillFromUrl } from "@/lib/skillImportClient";
 import { getUserPlanId } from "@/lib/userPlan";
 import { getPlan } from "@/lib/plans";
+import { SKILL_HUB_CATEGORIES, parseSkillSearchResults, type SkillHubResult } from "@/lib/skillHub";
+import { listConnectedPluginIds } from "@/lib/pluginConnections";
+import { callPluginAction } from "@/lib/pluginOrchestrator";
 
 type Props = {
   uid: string;
@@ -35,20 +39,29 @@ export default function SkillsPanel({ uid, open, onClose, onInstalledChange, onC
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
 
+  const [webSearchOn, setWebSearchOn] = useState(false);
+  const [hubQuery, setHubQuery] = useState("");
+  const [hubSearching, setHubSearching] = useState(false);
+  const [hubResults, setHubResults] = useState<SkillHubResult[] | null>(null);
+  const [hubError, setHubError] = useState<string | null>(null);
+  const [importingUrl, setImportingUrl] = useState<string | null>(null);
+
   const totalInstalled = installed.length + customSkills.length;
 
   useEffect(() => {
     if (!open) return;
     (async () => {
       setLoading(true);
-      const [ids, custom, planId] = await Promise.all([
+      const [ids, custom, planId, toolIds] = await Promise.all([
         listInstalledSkillIds(uid),
         listCustomSkills(uid),
         getUserPlanId(uid),
+        listConnectedPluginIds(uid),
       ]);
       setInstalled(ids);
       setCustomSkills(custom);
       setMaxSkills(getPlan(planId).maxSkills);
+      setWebSearchOn(toolIds.includes("web-search"));
       setLoading(false);
     })();
   }, [open, uid]);
@@ -74,6 +87,23 @@ export default function SkillsPanel({ uid, open, onClose, onInstalledChange, onC
     setBusyId(null);
   }
 
+  async function installFromUrl(url: string): Promise<Skill> {
+    const parsed = await importSkillFromUrl(url);
+    const skill: Skill = {
+      id: parsed.id,
+      name: parsed.name,
+      category: "writing",
+      description: parsed.description,
+      color: "#8A8578",
+      instructions: parsed.instructions,
+    };
+    await saveCustomSkill(uid, skill, url);
+    const next = [...customSkills.filter((s) => s.id !== skill.id), skill];
+    setCustomSkills(next);
+    onCustomSkillsChange?.(next);
+    return skill;
+  }
+
   async function handleImport() {
     if (!importUrl.trim()) return;
     if (totalInstalled >= maxSkills) {
@@ -83,25 +113,47 @@ export default function SkillsPanel({ uid, open, onClose, onInstalledChange, onC
     setImporting(true);
     setImportError(null);
     try {
-      const parsed = await importSkillFromUrl(importUrl.trim());
-      const skill: Skill = {
-        id: parsed.id,
-        name: parsed.name,
-        category: "writing",
-        description: parsed.description,
-        color: "#8A8578",
-        instructions: parsed.instructions,
-      };
-      await saveCustomSkill(uid, skill, importUrl.trim());
-      const next = [...customSkills.filter((s) => s.id !== skill.id), skill];
-      setCustomSkills(next);
-      onCustomSkillsChange?.(next);
+      const skill = await installFromUrl(importUrl.trim());
       setImportUrl("");
       setExpandedId(skill.id);
     } catch (err) {
       setImportError(err instanceof Error ? err.message : "Failed to import that skill.");
     } finally {
       setImporting(false);
+    }
+  }
+
+  async function handleHubSearch(query: string) {
+    if (!query.trim()) return;
+    setHubQuery(query);
+    setHubSearching(true);
+    setHubError(null);
+    setHubResults(null);
+    try {
+      const raw = await callPluginAction("web-search", "web-search.search", { query: `"SKILL.md" ${query}` });
+      setHubResults(parseSkillSearchResults(raw));
+    } catch (err) {
+      setHubError(err instanceof Error ? err.message : "Search failed.");
+    } finally {
+      setHubSearching(false);
+    }
+  }
+
+  async function handleHubInstall(result: SkillHubResult) {
+    if (totalInstalled >= maxSkills) {
+      onUpgrade();
+      return;
+    }
+    setImportingUrl(result.url);
+    setHubError(null);
+    try {
+      const skill = await installFromUrl(result.url);
+      setExpandedId(skill.id);
+      setHubResults((prev) => prev?.filter((r) => r.url !== result.url) || null);
+    } catch (err) {
+      setHubError(err instanceof Error ? `${result.title}: ${err.message}` : "Couldn't install that one.");
+    } finally {
+      setImportingUrl(null);
     }
   }
 
@@ -122,6 +174,72 @@ export default function SkillsPanel({ uid, open, onClose, onInstalledChange, onC
       title="Skills"
       subtitle={`${totalInstalled} of ${maxSkills} installed on your plan.`}
     >
+      {/* ---------------- Find skills (Hub) ---------------- */}
+      <div className="mb-8 rounded-md border border-clay/20 bg-clay/5 p-3">
+        <h3 className="text-sm font-medium text-ink">Find skills</h3>
+        <p className="mt-0.5 text-xs text-ink/55">
+          Searches the web for real, public SKILL.md files and installs the one you pick — same as pasting a link, just found for you.
+        </p>
+        {!webSearchOn && (
+          <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800">
+            Turn on the <strong>Web Search</strong> plugin (Plugins → Search &amp; Data) to use this.
+          </p>
+        )}
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {SKILL_HUB_CATEGORIES.map((c) => (
+            <button
+              key={c}
+              onClick={() => handleHubSearch(c)}
+              disabled={!webSearchOn || hubSearching}
+              className="rounded-full border border-ink/10 bg-white px-2.5 py-1 text-xs text-ink/70 transition-colors hover:bg-sand disabled:opacity-50"
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            value={hubQuery}
+            onChange={(e) => setHubQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleHubSearch(hubQuery)}
+            placeholder="Or search anything, e.g. “email newsletter writing”"
+            disabled={!webSearchOn}
+            className="focus-ring flex-1 rounded-md border border-ink/15 bg-white px-3 py-2 text-sm outline-none disabled:opacity-50"
+          />
+          <button
+            onClick={() => handleHubSearch(hubQuery)}
+            disabled={!webSearchOn || !hubQuery.trim() || hubSearching}
+            className="shrink-0 rounded-md bg-clay px-3 py-2 text-xs font-medium text-cream transition-colors hover:bg-clay-dark disabled:opacity-50"
+          >
+            {hubSearching ? "Searching…" : "Search"}
+          </button>
+        </div>
+        {hubError && <p className="mt-1.5 text-xs text-red-600">{hubError}</p>}
+        {hubResults && (
+          <div className="mt-2 space-y-1.5">
+            {hubResults.length === 0 ? (
+              <p className="text-xs text-ink/45">No public SKILL.md files turned up for that — try a different phrase.</p>
+            ) : (
+              hubResults.map((r) => (
+                <div key={r.url} className="flex items-center gap-2 rounded-md border border-ink/10 bg-white px-2.5 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-medium text-ink">{r.title}</p>
+                    <p className="truncate text-[11px] text-ink/45">{r.url}</p>
+                  </div>
+                  <button
+                    onClick={() => handleHubInstall(r)}
+                    disabled={importingUrl === r.url}
+                    className="shrink-0 rounded-md border border-clay/30 bg-clay/10 px-2.5 py-1 text-xs font-medium text-clay hover:bg-clay/20 disabled:opacity-50"
+                  >
+                    {importingUrl === r.url ? "Installing…" : "Install"}
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="mb-8">
         <h3 className="text-sm font-medium text-ink">Import from a link</h3>
         <p className="mt-0.5 text-xs text-ink/50">
