@@ -3,8 +3,11 @@
 import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
 import { extractCodeFiles } from "@/lib/codeExtract";
 import { AGENT_CORE, DEV_CRAFT_GUIDE } from "@/lib/agents";
+import { findReferenceUrl, inspectReferenceSite } from "@/lib/siteInspector";
+import { portForScope, sessionIdForScope } from "@/lib/workspaceScope";
 import {
   ensureAgentWorkspace,
+  freeAgentPort,
   getAgentPreview,
   listAgentFiles,
   listAgentPorts,
@@ -23,10 +26,10 @@ export type DeveloperRunResult = {
 };
 
 // A request is a coding task when it pairs a build-ish verb with a software
-// noun, or mentions an unmistakable dev term. The old regex matched single
-// words like "make", "app" or "post", so ordinary chat messages spun up a cloud
-// workspace (and then reported a failed build).
-const VERB = /\b(build|create|make|develop|code|write|fix|debug|refactor|implement|generate|design|add|update|change|edit|improve|deploy)\b/i;
+// noun, or mentions an unmistakable dev term. A bare word like "make", "app"
+// or "post" is not enough on its own — that used to spin up a cloud
+// workspace (and then report a failed build) for ordinary chat messages.
+const VERB = /\b(build|create|make|develop|code|write|fix|debug|refactor|implement|generate|design|add|update|change|edit|improve|deploy|clone)\b/i;
 const NOUN =
   /\b(website|web\s?site|web\s?app|webapp|landing\s?page|homepage|portfolio|dashboard|game|app|application|component|frontend|front-end|backend|back-end|api|script|repo|repository|project|codebase|bug|3d|three\.?js|webgl|canvas|animation|css|html|javascript|typescript|react|next\.?js|vite|python|node|tailwind|function|endpoint|scene|shader)\b/i;
 const STRONG = /(three\.?js|webgl|next\.?js|\breact\b|typescript|javascript|\bnpm\b|\bcodespace\b|localhost|\.(tsx?|jsx?|html?|css|py)\b|```)/i;
@@ -49,12 +52,15 @@ function safePath(path: string): string | null {
   return clean;
 }
 
-function buildPrompt(task: string, history: ChatMessage[], existingContext: string): string {
+function buildPrompt(task: string, history: ChatMessage[], existingContext: string, reference: string | null, installedSkillsContext: string): string {
   return `${AGENT_CORE}
 
 You are the Developer Agent working inside a real persistent cloud workspace (Linux, Node 20+, Python 3). Build or fix the user's requested project for real.
 
 ${DEV_CRAFT_GUIDE}
+${installedSkillsContext ? `\n${installedSkillsContext}\n` : ""}
+${reference ? `\nREFERENCE SITE — YOU ALREADY OPENED THIS AND READ IT FOR REAL, USE IT:\n${reference}\n\nBase the structure, sections and wording on what's actually there above — do not silently invent a different design and call it a "clone".\n` : ""}
+Before writing files, briefly plan to yourself (do not include this plan in your output): what pages/sections this needs, the layout, and a specific colour palette + font pairing that fits the goal. Then build exactly that.
 
 USER TASK:
 ${task}
@@ -75,13 +81,14 @@ full file contents
 Rules: paths are relative to the project root (no leading slash). Every file must be complete — never partial diffs. Do not add explanations outside the file blocks. If it is a static site, include index.html. If it needs npm, include a complete package.json with "dev" and "build" scripts.`;
 }
 
-async function detectServerPort(preferred: number, tries = 18): Promise<number | null> {
+async function detectServerPort(preferred: number, before: number[], tries = 18): Promise<number | null> {
+  const baseline = new Set(before);
   for (let i = 0; i < tries; i++) {
     try {
       const ports = await listAgentPorts();
       if (ports.includes(preferred)) return preferred;
-      const candidate = ports.find((p) => p >= 3000 && p <= 9999);
-      if (candidate) return candidate;
+      const fresh = ports.find((p) => !baseline.has(p) && p >= 3000 && p <= 9999);
+      if (fresh) return fresh;
     } catch {
       // keep trying
     }
@@ -96,8 +103,11 @@ export async function runDeveloperWorkspace(
   task: string,
   model: string | undefined,
   history: ChatMessage[],
-  onStep?: (step: string) => void
+  onStep: ((step: string) => void) | undefined,
+  chatId?: string | null,
+  installedSkillsContext = ""
 ): Promise<DeveloperRunResult> {
+  const scope = chatId || undefined;
   const steps: string[] = [];
   const step = (s: string) => {
     steps.push(s);
@@ -113,7 +123,17 @@ export async function runDeveloperWorkspace(
   }
   step(`Workspace ready: ${workspace.sandboxId.slice(0, 10)}…`);
 
-  const existingFiles = await listAgentFiles(true).catch(() => []);
+  // Look before "cloning": if the task references a real site, actually open
+  // it first instead of guessing what it looks like.
+  let reference: string | null = null;
+  const refUrl = findReferenceUrl(task);
+  if (refUrl) {
+    step(`Opening ${refUrl} to look at it first…`);
+    reference = await inspectReferenceSite(refUrl);
+    step(reference ? "Inspected the reference site." : "Couldn't open the reference site (no browser connected?) — building from the description only.");
+  }
+
+  const existingFiles = await listAgentFiles(true, scope).catch(() => []);
   let budget = 60_000;
   const existingContext = existingFiles
     .slice(0, 25)
@@ -129,7 +149,7 @@ export async function runDeveloperWorkspace(
     providerId,
     apiKey,
     model,
-    messages: [{ role: "user", content: buildPrompt(task, history, existingContext) }],
+    messages: [{ role: "user", content: buildPrompt(task, history, existingContext, reference, installedSkillsContext) }],
   });
   const files = extractCodeFiles([{ role: "assistant", content: response.text || "" }]).filter((f) => !/^snippet-/.test(f.filename));
   if (!files.length) throw new Error("Developer Agent did not return editable project files.");
@@ -141,7 +161,7 @@ export async function runDeveloperWorkspace(
       step(`Skipped unsafe path ${file.filename}`);
       continue;
     }
-    await writeAgentFile(path, file.code);
+    await writeAgentFile(path, file.code, scope);
     written.push(path);
     step(`Wrote ${path}`);
   }
@@ -157,10 +177,10 @@ export async function runDeveloperWorkspace(
 
   if (hasPackage) {
     const packageChanged = written.includes("package.json");
-    const needInstall = packageChanged || !(await runAgentCommand("test -d node_modules && echo yes || echo no", "workspace", 20).then((r) => r.output.includes("yes")).catch(() => false));
+    const needInstall = packageChanged || !(await runAgentCommand("test -d node_modules && echo yes || echo no", scope, 20).then((r) => r.output.includes("yes")).catch(() => false));
     if (needInstall) {
       step("Installing dependencies…");
-      const install = await runAgentCommand("npm install --no-audit --no-fund", "workspace", 300);
+      const install = await runAgentCommand("npm install --no-audit --no-fund", scope, 300);
       if (install.exitCode !== 0) {
         buildOk = false;
         buildOutput = install.output;
@@ -169,7 +189,7 @@ export async function runDeveloperWorkspace(
 
     if (buildOk && /"build"\s*:/.test(packageText)) {
       step("Running production build…");
-      let build = await runAgentCommand("npm run build", "workspace", 300);
+      let build = await runAgentCommand("npm run build", scope, 300);
       buildOutput = build.output;
       for (let attempt = 1; attempt <= 2 && build.exitCode !== 0; attempt++) {
         step(`Build failed. Repair attempt ${attempt}/2…`);
@@ -189,10 +209,10 @@ export async function runDeveloperWorkspace(
         for (const file of repaired) {
           const path = safePath(file.filename);
           if (!path) continue;
-          await writeAgentFile(path, file.code);
+          await writeAgentFile(path, file.code, scope);
           step(`Patched ${path}`);
         }
-        build = await runAgentCommand("npm run build", "workspace", 300);
+        build = await runAgentCommand("npm run build", scope, 300);
         buildOutput = build.output;
       }
       buildOk = build.exitCode === 0;
@@ -205,11 +225,13 @@ export async function runDeveloperWorkspace(
 
   if (buildOk && (hasPackage || hasHtml)) {
     const isVite = /vite/i.test(packageText);
-    const isNext = /"next"/i.test(packageText);
     const hasDev = /"dev"\s*:/.test(packageText);
     const hasStart = /"start"\s*:/.test(packageText);
-    const port = hasPackage ? (isVite ? 5173 : 3000) : 3000;
-    const session = `agenticvenus-dev-${Date.now()}`;
+    // Deterministic per-chat port: two different chats' dev servers never collide
+    // inside the shared sandbox.
+    const port = hasPackage ? portForScope(scope, isVite) : portForScope(scope, false);
+    const isNext = /"next"/i.test(packageText);
+    const session = sessionIdForScope(scope, `agenticvenus-dev-${Date.now()}`);
 
     let command: string;
     if (hasPackage && (hasDev || hasStart)) {
@@ -221,11 +243,13 @@ export async function runDeveloperWorkspace(
     }
 
     step(`Starting the server on port ${port}…`);
-    // The bracket trick stops pkill from matching (and killing) its own shell.
-    await runAgentSessionCommand("pkill -f '[n]ext dev|[v]ite|[h]ttp.server|[s]erve -l' || true", "agenticvenus-kill", false).catch(() => undefined);
-    await runAgentSessionCommand(command, session, true).catch((e) => step(`Server start failed: ${e instanceof Error ? e.message : String(e)}`));
+    const before = await listAgentPorts().catch(() => [] as number[]);
+    // Free only THIS chat's port before restarting — never a broad
+    // process-name kill, so other chats' dev servers stay untouched.
+    await freeAgentPort(port).catch(() => undefined);
+    await runAgentSessionCommand(command, session, scope, true).catch((e) => step(`Server start failed: ${e instanceof Error ? e.message : String(e)}`));
 
-    const live = await detectServerPort(port);
+    const live = await detectServerPort(port, before);
     if (live) {
       try {
         const preview = await getAgentPreview(live);
