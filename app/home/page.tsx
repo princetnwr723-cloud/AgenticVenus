@@ -54,7 +54,8 @@ import {
 import { sendChatMessage, type ChatMessage, type Attachment } from "@/lib/chatClient";
 import type { Provider } from "@/lib/providers";
 import { classifyAgent, getAgentById, type Agent } from "@/lib/agents";
-import { getAgentLessons, buildLessonsContext, reflectAndLearn } from "@/lib/agentMemory";
+import { getAgentMemory, buildLessonsContext, reflectAndLearn } from "@/lib/agentMemory";
+import MissionPanel from "@/components/MissionPanel";
 import SkillsPanel from "@/components/SkillsPanel";
 import PricingPanel from "@/components/PricingPanel";
 import { listInstalledSkillIds, buildInstalledSkillsContext } from "@/lib/skillConnections";
@@ -172,6 +173,7 @@ export default function HomePage() {
   const [customSkills, setCustomSkills] = useState<Skill[]>([]);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [pricingOpen, setPricingOpen] = useState(false);
+  const [missionsOpen, setMissionsOpen] = useState(false);
   const [planId, setPlanId] = useState<PlanId>("free");
   const [usageLimitError, setUsageLimitError] = useState<string | null>(null);
 
@@ -842,7 +844,12 @@ export default function HomePage() {
       setCodespaceOpen(true);
       setAgentStatus("💻 Developer Agent: terminal → code → build → preview → verify");
       try {
-        const dev = await runDeveloperWorkspace(provider.id, activeKey, task, model, nextMessages, (step) => setAgentStatus(`💻 ${step}`));
+        const dev = await runDeveloperWorkspace(
+          provider.id, activeKey, task, model, nextMessages,
+          (step) => setAgentStatus(`💻 ${step}`),
+          currentChatId,
+          buildInstalledSkillsContext(installedSkillIds, customSkills)
+        );
         setLivePreviewUrl(dev.previewUrl || null);
         setCodespaceOpen(true);
         toolResultNote += `\n\nREAL DEVELOPER WORKSPACE RESULT:\nChanged files: ${dev.changedFiles.join(", ")}\nBuild: ${dev.buildOk ? "PASS" : "FAIL"}\n${dev.buildOutput.slice(-10000)}${dev.previewUrl ? `\nLive preview: ${dev.previewUrl}` : ""}\n\nDo not claim more than this evidence proves.`;
@@ -1052,7 +1059,7 @@ export default function HomePage() {
     const agent = activeAgent || await classifyAgent(provider.id, activeKey, task, model);
     if (!activeAgent) setActiveAgent(agent);
 
-    const lessons = await getAgentLessons(user.uid, agent.id);
+    const memory = await getAgentMemory(user.uid, agent.id);
     const systemPrompt = [
       agent.systemPrompt,
       agentIdentity?.customPrompt ? `Additional instructions specific to you (${agentIdentity.name}): ${agentIdentity.customPrompt}` : null,
@@ -1060,7 +1067,7 @@ export default function HomePage() {
       toolsContext,
       infraToolsContext,
       installedSkillsContext,
-      buildLessonsContext(lessons),
+      buildLessonsContext(memory),
       toolResultNote,
       "Formatting: use **bold** around the genuinely important parts of your answer — key numbers, names, decisions, or action items — so they stand out. Don't bold everything; be selective. Use markdown lists and short paragraphs where that helps readability.",
     ]
@@ -1138,6 +1145,7 @@ export default function HomePage() {
           onOpenSkills={() => setSkillsOpen(true)}
           onOpenPricing={() => setPricingOpen(true)}
           onOpenConnections={() => setConnectionsOpen(true)}
+          onOpenMissions={() => setMissionsOpen(true)}
           onLogout={() => signOut(auth)}
         />
       )}
@@ -1500,6 +1508,13 @@ export default function HomePage() {
           await refreshChats();
         }}
       />
+      <MissionPanel
+        uid={user.uid}
+        open={missionsOpen}
+        onClose={() => setMissionsOpen(false)}
+        activeConnection={activeConnection}
+        currentChatId={chatId}
+      />
       {chatId && agentIdentity && (
         <AgentSettingsModal
           open={agentSettingsOpen}
@@ -1511,6 +1526,7 @@ export default function HomePage() {
       <CloudWorkspacePanel open={cloudWorkspaceOpen} onClose={() => setCloudWorkspaceOpen(false)} />
       <CodespacePanel
         livePreviewUrl={livePreviewUrl}
+        chatId={chatId}
         agentBusy={!!agentStatus && agentStatus.includes("💻")}
         open={codespaceOpen}
         onClose={() => {
