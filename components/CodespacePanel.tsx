@@ -1,23 +1,10 @@
 "use client";
 
 // components/CodespacePanel.tsx
-// Codespace, rebuilt to the reference design: a "Code" view switcher, a
-// Publish button (with a dot when there is something new to publish), a
-// collapsible file tree on the left, a breadcrumb + copy/download bar, and a
-// line-numbered, syntax-highlighted editor.
-//
-// What changed under the hood
-//  - Shows EVERY file the agent creates: the cloud workspace (Daytona) files
-//    and the files from the chat are merged (workspace wins per path). New
-//    files appear instantly (refresh event on each write) and, while the agent
-//    is working, the panel follows the file being written.
-//  - No more polling storms or repeating errors: the workspace is polled
-//    gently, and if no Daytona key exists it stops and says so once.
-//  - Preview tab: localhost:<port> from the cloud workspace (auto-opened when
-//    the terminal or the agent starts a dev server) or a static preview built
-//    from the files. The static preview runs sandboxed (no access to the app's
-//    login), supports Three.js, and reports runtime errors.
-//  - Terminal drawer runs inside the project folder.
+// Codespace, now scoped to ONE chat via `chatId`: the file tree, editor,
+// terminal and preview all read/write that chat's own project folder inside
+// the shared cloud sandbox (see lib/workspaceScope.ts), so two chats never
+// show each other's files or fight over the same dev-server port.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CodeFile } from "@/lib/codeExtract";
@@ -26,6 +13,7 @@ import type { Attachment } from "@/lib/chatClient";
 import { buildPreviewHtml, listHtmlPages } from "@/lib/preview";
 import { publishProject } from "@/lib/publishClient";
 import { getAgentPreview, listAgentFiles, WORKSPACE_CHANGED_EVENT, writeAgentFile } from "@/lib/workspaceClient";
+import { portForScope } from "@/lib/workspaceScope";
 import VerificationBadge from "@/components/VerificationBadge";
 import FileTree from "@/components/codespace/FileTree";
 import CodeEditor from "@/components/codespace/CodeEditor";
@@ -38,6 +26,10 @@ type Props = {
   assets?: Attachment[];
   openFileId?: string | null;
   livePreviewUrl?: string | null;
+  /** Which chat this Codespace belongs to — its files live in their own
+   * folder inside the shared cloud sandbox. Falls back to a shared "global"
+   * scope before a chat exists yet. */
+  chatId?: string | null;
   /** true while the agent is building — makes the panel refresh faster and follow new files */
   agentBusy?: boolean;
 };
@@ -177,7 +169,9 @@ function MenuItem({ icon, label, hint, checked, disabled, onClick }: { icon?: Re
   );
 }
 
-export default function CodespacePanel({ open, onClose, files, assets = [], openFileId = null, livePreviewUrl = null, agentBusy = false }: Props) {
+export default function CodespacePanel({ open, onClose, files, assets = [], openFileId = null, livePreviewUrl = null, chatId = null, agentBusy = false }: Props) {
+  const scope = chatId || "global";
+
   const [view, setView] = useState<"code" | "preview">("code");
   const [menu, setMenu] = useState<MenuName>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -202,7 +196,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
   const [publishError, setPublishError] = useState<string | null>(null);
   const [publishedSig, setPublishedSig] = useState<string | null>(null);
 
-  const [previewPort, setPreviewPort] = useState("3000");
+  const [previewPort, setPreviewPort] = useState(() => String(portForScope(chatId, false)));
   const [remoteUrl, setRemoteUrl] = useState<string | null>(null);
   const [previewSource, setPreviewSource] = useState<"live" | "static">("static");
   const [previewPage, setPreviewPage] = useState<string | null>(null);
@@ -214,6 +208,22 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
   const lastPick = useRef(0);
   const knownPaths = useRef<Set<string>>(new Set());
   const iframeRef = useRef<HTMLIFrameElement>(null);
+
+  // Switching chats means switching Codespaces — reset everything scoped to
+  // the previous chat's files/preview instead of showing stale content.
+  useEffect(() => {
+    setRemote([]);
+    setActivePath(null);
+    setDrafts({});
+    setRemoteUrl(null);
+    setPreviewSource("static");
+    setPublishedUrl(null);
+    setPublishedSig(null);
+    setPreviewPort(String(portForScope(chatId, false)));
+    knownPaths.current = new Set();
+    cloudOff.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId]);
 
   // ---------------------------------------------------------------- files
   const merged = useMemo<CodeFile[]>(() => {
@@ -235,14 +245,13 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
   const active = merged.find((f) => f.filename === activePath) ?? null;
   const signature = useMemo(() => merged.map((f) => `${f.filename}:${f.code.length}`).join("|"), [merged]);
   const needsPublish = merged.length > 0 && (!publishedUrl || publishedSig !== signature);
-  const dirtyPaths = Object.keys(drafts);
 
   const sync = useCallback(async () => {
     if (inFlight.current || cloudOff.current) return;
     inFlight.current = true;
     setSyncing(true);
     try {
-      const list = await listAgentFiles(true);
+      const list = await listAgentFiles(true, scope);
       const next = list.map((f) => ({ path: normPath(f.path), content: f.content ?? "" }));
       setRemote((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
       setCloud("ready");
@@ -258,26 +267,28 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
       inFlight.current = false;
       setSyncing(false);
     }
-  }, []);
+  }, [scope]);
 
-  // Poll gently; refresh right away whenever any code writes a file.
+  // Poll gently; refresh right away whenever any code writes a file for THIS chat.
   useEffect(() => {
     if (!open) return;
     cloudOff.current = false;
     sync();
     const interval = window.setInterval(sync, agentBusy ? 2500 : 7000);
     let debounce: number | undefined;
-    const onChanged = () => {
+    const onChanged = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { scope?: string } | undefined;
+      if (detail?.scope && detail.scope !== scope) return; // another chat's write
       window.clearTimeout(debounce);
       debounce = window.setTimeout(sync, 350);
     };
-    window.addEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
+    window.addEventListener(WORKSPACE_CHANGED_EVENT, onChanged as EventListener);
     return () => {
       window.clearInterval(interval);
       window.clearTimeout(debounce);
-      window.removeEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
+      window.removeEventListener(WORKSPACE_CHANGED_EVENT, onChanged as EventListener);
     };
-  }, [open, agentBusy, sync]);
+  }, [open, agentBusy, sync, scope]);
 
   // Choose / follow the open file.
   useEffect(() => {
@@ -383,7 +394,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
     const content = drafts[path];
     setSaving(true);
     try {
-      await writeAgentFile(path, content);
+      await writeAgentFile(path, content, scope);
       setDrafts((d) => {
         const { [path]: _removed, ...rest } = d;
         return rest;
@@ -490,11 +501,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
             {syncing && <span className="mr-1 hidden h-1.5 w-1.5 animate-pulse rounded-full bg-[#0a84ff] sm:block" title="Syncing workspace" />}
 
             <div className="relative" onClick={(e) => e.stopPropagation()}>
-              <IconButton
-                label="More"
-                active={menu === "more"}
-                onClick={() => setMenu(menu === "more" ? null : "more")}
-              >
+              <IconButton label="More" active={menu === "more"} onClick={() => setMenu(menu === "more" ? null : "more")}>
                 {Icon.dots}
               </IconButton>
               {menu === "more" && (
@@ -572,7 +579,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
           {view === "code" ? (
             merged.length === 0 ? (
               <div className="flex flex-1 items-center justify-center px-8 text-center text-[13.5px] leading-relaxed text-[#7d7d7d]">
-                {cloud === "connecting" ? "Loading the workspace…" : "Files the agent builds will appear here as it writes them. Ask the Developer Agent to build something."}
+                {cloud === "connecting" ? "Loading the workspace…" : "Files the agent builds in this chat will appear here as it writes them. Ask the Developer Agent to build something."}
               </div>
             ) : (
               <div className="flex min-h-0 flex-1">
@@ -725,6 +732,7 @@ export default function CodespacePanel({ open, onClose, files, assets = [], open
               </div>
               <div className="min-h-0 flex-1">
                 <TerminalPane
+                  scope={scope}
                   onPortDetected={openLive}
                   onWorkspaceStatus={(ready) => {
                     if (ready) {
