@@ -1,27 +1,18 @@
 // Server-only AgenticVenus persistent coding workspace runtime.
-// A user's workspace is a durable Daytona Sandbox. The browser never receives
-// the Daytona API key; API routes authenticate the Firebase user and resolve
-// the encrypted key server-side.
-//
-// FIXES
-//  - Terminal sessions now start inside the project folder (`workspace/`), so
-//    `npm install`, `npm run dev`, `ls` run where the agent's files actually are.
-//    Before, they ran in the sandbox home directory and the dev server never
-//    found package.json.
-//  - File listing skips build output (.next, dist, node_modules…), skips huge
-//    files and caps the count — after a build the old listing tried to `cat`
-//    thousands of generated files.
-//  - Session logs + listening-port detection, so long-running servers
-//    (`npm run dev`) can be started without blocking and previewed on localhost.
-//  - The sandbox lookup is cached for a few seconds, so polling the file tree
-//    doesn't hit Daytona + Firestore three times per refresh.
+// A user's workspace is a durable Daytona Sandbox (ONE per user — spinning a
+// brand-new VM per chat would be slow and expensive to boot). Per-chat
+// isolation instead comes from a scoped project path: every chat's files
+// live under workspace/<scope>/ (see lib/workspaceScope.ts), with its own
+// terminal session names and its own stable dev-server port, so two chats
+// never see or collide with each other's files, terminal, or preview.
 import { Daytona } from "@daytona/sdk";
 import { adminDb } from "@/lib/firebaseAdmin";
 import { resolveIntegrationSecret } from "@/lib/secretsResolve";
+import { signPreviewToken } from "@/lib/previewToken";
+import { projectPathForScope, sanitizeScope } from "@/lib/workspaceScope";
 
 const COLLECTION = "agentWorkspace";
 const DOC_ID = "default";
-const PROJECT_DIR = "workspace";
 const STATE_CACHE_MS = 20_000;
 
 const IGNORED_DIRS = ["node_modules", ".git", ".next", "dist", "build", "out", ".vercel", ".turbo", ".cache", "coverage", ".venv", "__pycache__", ".parcel-cache", ".svelte-kit"];
@@ -38,7 +29,6 @@ export type WorkspaceState = {
   sandboxId: string;
   state?: string;
   workDir?: string;
-  projectDir: string;
   updatedAt: number;
 };
 
@@ -65,7 +55,7 @@ export async function ensureWorkspace(uid: string): Promise<WorkspaceState> {
   let sandbox = stored?.sandboxId ? await daytona.get(stored.sandboxId).catch(() => null) : null;
   if (!sandbox) {
     sandbox = await daytona.create({ language: "typescript", autoDeleteInterval: -1 });
-    await sandbox.process.executeCommand(`mkdir -p ${PROJECT_DIR}`);
+    await sandbox.process.executeCommand("mkdir -p workspace");
   } else if (sandbox.state && sandbox.state !== "started") {
     await sandbox.start(60);
   }
@@ -74,7 +64,6 @@ export async function ensureWorkspace(uid: string): Promise<WorkspaceState> {
     sandboxId: sandbox.id,
     state: sandbox.state,
     workDir: await sandbox.getWorkDir().catch(() => undefined),
-    projectDir: PROJECT_DIR,
     updatedAt: Date.now(),
   };
   if (stored?.sandboxId !== state.sandboxId || stored?.state !== state.state) {
@@ -96,9 +85,11 @@ async function withSandbox(uid: string) {
   }
 }
 
-export async function workspaceExec(uid: string, command: string, cwd = PROJECT_DIR, timeout = 120) {
+export async function workspaceExec(uid: string, command: string, scope?: string, timeout = 120) {
   if (!command.trim()) throw new Error("COMMAND_REQUIRED");
   const { state, sandbox } = await withSandbox(uid);
+  const cwd = projectPathForScope(scope);
+  await sandbox.process.executeCommand(`mkdir -p '${cwd}'`, undefined, undefined, 15).catch(() => undefined);
   const result = await sandbox.process.executeCommand(command, cwd, undefined, Math.min(Math.max(timeout, 1), 300));
   return {
     sandboxId: state.sandboxId,
@@ -109,15 +100,16 @@ export async function workspaceExec(uid: string, command: string, cwd = PROJECT_
   };
 }
 
-export async function workspaceSessionExec(uid: string, sessionId: string, command: string, runAsync = false) {
+export async function workspaceSessionExec(uid: string, sessionId: string, command: string, scope?: string, runAsync = false) {
   if (!command.trim()) throw new Error("COMMAND_REQUIRED");
   const { state, sandbox } = await withSandbox(uid);
+  const cwd = projectPathForScope(scope);
   try {
     await sandbox.process.getSession(sessionId);
   } catch {
     await sandbox.process.createSession(sessionId);
-    // A brand-new shell starts in the sandbox home — move it into the project.
-    await sandbox.process.executeSessionCommand(sessionId, { command: `cd ${PROJECT_DIR} 2>/dev/null || (mkdir -p ${PROJECT_DIR} && cd ${PROJECT_DIR})`, runAsync: false });
+    // A brand-new shell starts in the sandbox home — move it into this chat's project.
+    await sandbox.process.executeSessionCommand(sessionId, { command: `mkdir -p '${cwd}' && cd '${cwd}'`, runAsync: false });
   }
   const result = await sandbox.process.executeSessionCommand(sessionId, { command, runAsync });
   return { sandboxId: state.sandboxId, sessionId, ...result };
@@ -148,42 +140,60 @@ export async function workspaceListeningPorts(uid: string) {
   return { ports };
 }
 
-export async function workspaceWriteFile(uid: string, path: string, content: string) {
-  const { state, sandbox } = await withSandbox(uid);
-  const safePath = path.replace(/^\/+/, "").replace(/\.\.\//g, "");
-  const dir = safePath.includes("/") ? safePath.slice(0, safePath.lastIndexOf("/")) : "";
-  if (dir) await sandbox.process.executeCommand(`mkdir -p '${dir.replace(/'/g, "'\\''")}'`, PROJECT_DIR);
-  await sandbox.fs.uploadFile(Buffer.from(content, "utf8"), `${PROJECT_DIR}/${safePath}`);
-  return { sandboxId: state.sandboxId, path: `${PROJECT_DIR}/${safePath}` };
+/** Force-frees a port before (re)starting a dev server on it — kills only
+ * whatever is bound to THAT port, never a broad "pkill next|vite", so other
+ * chats' dev servers running in the same sandbox are never touched. */
+export async function workspaceFreePort(uid: string, port: number) {
+  const { sandbox } = await withSandbox(uid);
+  await sandbox.process
+    .executeCommand(`(lsof -ti tcp:${port} 2>/dev/null | xargs -r kill -9) || (fuser -k ${port}/tcp 2>/dev/null) || true`, undefined, undefined, 15)
+    .catch(() => undefined);
 }
 
-export async function workspaceReadFile(uid: string, path: string) {
+export async function workspaceWriteFile(uid: string, path: string, content: string, scope?: string) {
   const { state, sandbox } = await withSandbox(uid);
+  const root = projectPathForScope(scope);
   const safePath = path.replace(/^\/+/, "").replace(/\.\.\//g, "");
-  const data = await sandbox.fs.downloadFile(`${PROJECT_DIR}/${safePath}`);
+  const dir = safePath.includes("/") ? safePath.slice(0, safePath.lastIndexOf("/")) : "";
+  await sandbox.process.executeCommand(`mkdir -p '${(dir ? `${root}/${dir}` : root).replace(/'/g, "'\\''")}'`, undefined, undefined, 15);
+  await sandbox.fs.uploadFile(Buffer.from(content, "utf8"), `${root}/${safePath}`);
+  return { sandboxId: state.sandboxId, path: `${root}/${safePath}` };
+}
+
+export async function workspaceReadFile(uid: string, path: string, scope?: string) {
+  const { state, sandbox } = await withSandbox(uid);
+  const root = projectPathForScope(scope);
+  const safePath = path.replace(/^\/+/, "").replace(/\.\.\//g, "");
+  const data = await sandbox.fs.downloadFile(`${root}/${safePath}`);
   return { sandboxId: state.sandboxId, path: safePath, content: data.toString("utf8") };
 }
 
+/** Returns a same-origin, warning-free preview URL for a port inside this
+ * sandbox — see app/api/preview/[token]/... — instead of Daytona's raw
+ * signed URL, which showed a click-through interstitial inside the iframe. */
 export async function workspacePreview(uid: string, port: number) {
-  const { state, sandbox } = await withSandbox(uid);
-  const signed = await sandbox.getSignedPreviewUrl(port, 3600);
-  return { sandboxId: state.sandboxId, port, url: signed.url };
+  const state = await ensureWorkspace(uid);
+  const token = signPreviewToken({ uid, sandboxId: state.sandboxId, port });
+  return { sandboxId: state.sandboxId, port, url: `/api/preview/${token}/` };
 }
 
-function findExpression(): string {
+function findExpression(root: string): string {
   const prune = IGNORED_DIRS.map((d) => `-name '${d}'`).join(" -o ");
   const names = TEXT_GLOBS.map((g) => `-name '${g}'`).join(" -o ");
-  return `find ${PROJECT_DIR} \\( -type d \\( ${prune} \\) -prune \\) -o -type f -size -${MAX_FILE_BYTES} \\( ${names} \\) -print`;
+  return `find '${root}' \\( -type d \\( ${prune} \\) -prune \\) -o -type f -size -${MAX_FILE_BYTES} \\( ${names} \\) -print`;
 }
 
-export async function workspaceListFiles(uid: string, includeContent = false) {
+export async function workspaceListFiles(uid: string, includeContent = false, scope?: string) {
   const { sandbox } = await withSandbox(uid);
-  const find = findExpression();
+  const root = projectPathForScope(scope);
+  await sandbox.process.executeCommand(`mkdir -p '${root}'`, undefined, undefined, 15).catch(() => undefined);
+  const find = findExpression(root);
+  const stripRe = new RegExp(`^${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`);
 
   if (!includeContent) {
     const result = await sandbox.process.executeCommand(`${find} | sort | head -n ${MAX_FILES}`, undefined, undefined, 60);
     const output = result.result || result.artifacts?.stdout || "";
-    return { files: output.split(/\r?\n/).filter(Boolean).map((path: string) => ({ path: path.replace(/^workspace\//, "") })) };
+    return { files: output.split(/\r?\n/).filter(Boolean).map((path: string) => ({ path: path.replace(stripRe, "") })) };
   }
 
   const result = await sandbox.process.executeCommand(
@@ -196,7 +206,7 @@ export async function workspaceListFiles(uid: string, includeContent = false) {
   const files: { path: string; content: string }[] = [];
   for (const chunk of output.split(/---AV_FILE_END---/)) {
     const match = chunk.match(/^\s*FILE:(.+?)\n([\s\S]*)$/);
-    if (match) files.push({ path: match[1].replace(/^workspace\//, "").trim(), content: match[2].replace(/\n$/, "") });
+    if (match) files.push({ path: match[1].replace(stripRe, "").trim(), content: match[2].replace(/\n$/, "") });
   }
   return { files };
 }
@@ -210,3 +220,5 @@ export async function workspaceDelete(uid: string) {
   if (sandbox) await sandbox.delete(60, true);
   await adminDb().collection("users").doc(uid).collection(COLLECTION).doc(DOC_ID).delete();
 }
+
+export { sanitizeScope };
