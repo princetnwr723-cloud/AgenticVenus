@@ -6,6 +6,7 @@ import {
   workspaceSessionExec,
   workspaceSessionLogs,
   workspaceListeningPorts,
+  workspaceFreePort,
   workspaceWriteFile,
   workspaceReadFile,
   workspacePreview,
@@ -26,16 +27,18 @@ export async function POST(req: NextRequest) {
     const uid = await uidFrom(req);
     const body = await req.json();
     const action = body?.action as string;
+    const scope: string | undefined = body?.scope;
 
     if (action === "ensure") return NextResponse.json({ ok: true, workspace: await ensureWorkspace(uid) });
-    if (action === "exec") return NextResponse.json({ ok: true, result: await workspaceExec(uid, body.command, body.cwd, body.timeout) });
-    if (action === "sessionExec") return NextResponse.json({ ok: true, result: await workspaceSessionExec(uid, body.sessionId || "agenticvenus-terminal", body.command, !!body.runAsync) });
+    if (action === "exec") return NextResponse.json({ ok: true, result: await workspaceExec(uid, body.command, scope, body.timeout) });
+    if (action === "sessionExec") return NextResponse.json({ ok: true, result: await workspaceSessionExec(uid, body.sessionId || "agenticvenus-terminal", body.command, scope, !!body.runAsync) });
     if (action === "sessionLogs") return NextResponse.json({ ok: true, result: await workspaceSessionLogs(uid, body.sessionId, body.cmdId) });
     if (action === "ports") return NextResponse.json({ ok: true, ...(await workspaceListeningPorts(uid)) });
-    if (action === "write") return NextResponse.json({ ok: true, result: await workspaceWriteFile(uid, body.path, body.content) });
-    if (action === "read") return NextResponse.json({ ok: true, result: await workspaceReadFile(uid, body.path) });
+    if (action === "freePort") { await workspaceFreePort(uid, Number(body.port)); return NextResponse.json({ ok: true }); }
+    if (action === "write") return NextResponse.json({ ok: true, result: await workspaceWriteFile(uid, body.path, body.content, scope) });
+    if (action === "read") return NextResponse.json({ ok: true, result: await workspaceReadFile(uid, body.path, scope) });
     if (action === "preview") return NextResponse.json({ ok: true, result: await workspacePreview(uid, Number(body.port || 3000)) });
-    if (action === "list") return NextResponse.json({ ok: true, ...(await workspaceListFiles(uid, !!body.includeContent)) });
+    if (action === "list") return NextResponse.json({ ok: true, ...(await workspaceListFiles(uid, !!body.includeContent, scope)) });
     if (action === "delete") { await workspaceDelete(uid); return NextResponse.json({ ok: true }); }
 
     return NextResponse.json({ error: "Unknown workspace action." }, { status: 400 });
