@@ -16,6 +16,7 @@ type Props = {
   onOpenSkills: () => void;
   onOpenPricing: () => void;
   onOpenConnections: () => void;
+  onOpenMissions: () => void;
   onLogout: () => void;
   chats: ChatSummary[];
   groups: ChatGroup[];
@@ -37,6 +38,7 @@ export default function Sidebar({
   onOpenSkills,
   onOpenPricing,
   onOpenConnections,
+  onOpenMissions,
   onLogout,
   chats,
   groups,
@@ -67,6 +69,7 @@ export default function Sidebar({
       </div>
 
       <div className="mt-4 space-y-0.5 px-3">
+        <NavItem icon={<MissionIcon />} label="Missions" onClick={onOpenMissions} highlight />
         <NavItem icon={<SchedulerIcon />} label="Scheduler" onClick={onOpenScheduler} />
         <NavItem icon={<PluginIcon />} label="Plugins" onClick={onOpenPlugins} />
         <NavItem icon={<MCPIcon />} label="MCP Tools" onClick={onOpenMCP} />
@@ -139,18 +142,29 @@ export default function Sidebar({
   );
 }
 
-function NavItem({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+function NavItem({ icon, label, onClick, highlight }: { icon: React.ReactNode; label: string; onClick: () => void; highlight?: boolean }) {
   return (
     <button
       onClick={onClick}
-      className="focus-ring flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm text-ink/70 transition-colors hover:bg-sand hover:text-ink"
+      className={`focus-ring flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm transition-colors hover:bg-sand hover:text-ink ${
+        highlight ? "font-medium text-clay" : "text-ink/70"
+      }`}
     >
-      <span className="text-ink/50">{icon}</span>
+      <span className={highlight ? "text-clay" : "text-ink/50"}>{icon}</span>
       {label}
     </button>
   );
 }
 
+function MissionIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+      <path d="M7.5 1.5c2 1.2 3 3.2 3 5.2 0 1.6-.6 2.9-1.4 4l-1.6 2.3-1.6-2.3c-.8-1.1-1.4-2.4-1.4-4 0-2 1-4 3-5.2Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <circle cx="7.5" cy="6.5" r="1.2" stroke="currentColor" strokeWidth="1.1" />
+      <path d="M4 10.5 2.3 12M11 10.5l1.7 1.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+}
 function SchedulerIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
