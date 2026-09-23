@@ -1,34 +1,36 @@
 "use client";
 
 // components/codespace/TerminalPane.tsx
-// A real terminal into the persistent cloud workspace (Daytona). Commands run
-// inside the project folder in a persistent shell session (cd persists).
-// Long-running commands (npm run dev, vite, next dev, http.server …) are
-// started in their own background session, their output is streamed back, and
-// the moment a server starts listening the parent is told the port so the
-// Preview tab can open localhost:<port> automatically.
+// A real terminal into the persistent cloud workspace (Daytona), scoped to
+// ONE chat (`scope`, normally the chatId): commands run inside that chat's
+// own project folder, its own long-running session names, and — because the
+// dev-server port is derived deterministically from the scope
+// (lib/workspaceScope.ts) — its own port, so two chats' terminals and dev
+// servers never step on each other inside the shared sandbox.
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { getAgentSessionLogs, listAgentPorts, runAgentSessionCommand } from "@/lib/workspaceClient";
+import { sessionIdForScope } from "@/lib/workspaceScope";
 
-const SHELL_SESSION = "agenticvenus-terminal";
 const LONG_RUNNING =
   /(^|\s)(npm|pnpm|yarn|bun)\s+(run\s+)?(dev|start|serve|preview)\b|\b(vite|next\s+dev|nodemon|live-server|http\.server|npx\s+serve|astro\s+dev)\b|&\s*$/i;
 
 type Props = {
+  scope?: string;
   onPortDetected: (port: number) => void;
   onWorkspaceStatus?: (ready: boolean) => void;
 };
 
 const QUICK = ["ls", "npm install", "npm run dev", "npm run build"];
 
-export default function TerminalPane({ onPortDetected, onWorkspaceStatus }: Props) {
+export default function TerminalPane({ scope, onPortDetected, onWorkspaceStatus }: Props) {
   const [lines, setLines] = useState<string[]>([]);
   const [command, setCommand] = useState("");
   const [busy, setBusy] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const history = useRef<string[]>([]);
   const historyIndex = useRef(-1);
+  const shellSession = sessionIdForScope(scope, "agenticvenus-terminal");
 
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
@@ -37,8 +39,8 @@ export default function TerminalPane({ onPortDetected, onWorkspaceStatus }: Prop
   const print = (...next: string[]) => setLines((cur) => [...cur.slice(-400), ...next]);
 
   async function runLongRunning(cmd: string) {
-    const session = `agenticvenus-bg-${Date.now()}`;
-    const started = await runAgentSessionCommand(cmd, session, true);
+    const session = sessionIdForScope(scope, `agenticvenus-bg-${Date.now()}`);
+    const started = await runAgentSessionCommand(cmd, session, scope, true);
     onWorkspaceStatus?.(true);
     print("↳ started in the background — waiting for it to listen on a port…");
 
@@ -89,7 +91,7 @@ export default function TerminalPane({ onPortDetected, onWorkspaceStatus }: Prop
       if (LONG_RUNNING.test(cmd)) {
         await runLongRunning(cmd.replace(/&\s*$/, ""));
       } else {
-        const result = await runAgentSessionCommand(cmd, SHELL_SESSION, false);
+        const result = await runAgentSessionCommand(cmd, shellSession, scope, false);
         onWorkspaceStatus?.(true);
         const output = result.output || result.stdout || result.stderr || "";
         print(...(output ? output.replace(/\n$/, "").split("\n") : []), `exit ${result.exitCode ?? 0}`);
@@ -126,7 +128,7 @@ export default function TerminalPane({ onPortDetected, onWorkspaceStatus }: Prop
           ))
         ) : (
           <div className="text-[#6b6b6b]">
-            Terminal ready — commands run inside your project folder. Try <span className="text-[#9a9a9a]">npm install</span> then{" "}
+            Terminal ready — commands run inside THIS chat's own project folder. Try <span className="text-[#9a9a9a]">npm install</span> then{" "}
             <span className="text-[#9a9a9a]">npm run dev</span>; the preview opens on localhost automatically.
           </div>
         )}
