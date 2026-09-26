@@ -11,10 +11,6 @@ import { ChatMessageItem, TypingIndicator } from "@/components/ChatMessage";
 import SchedulerPanel from "@/components/SchedulerPanel";
 import ConnectorsPanel from "@/components/ConnectorsPanel";
 import MissionFlowPanel from "@/components/MissionFlowPanel";
-import { looksLikeMissionTask } from "@/lib/mission/classifier";
-import { planMission } from "@/lib/mission/planner";
-import { createMission } from "@/lib/mission/store";
-import { runMission, type ExecutorDeps as MissionExecutorDeps } from "@/lib/missionRunner";
 import { decideTerminalCommand, runPlannedCommand } from "@/lib/terminalOrchestrator";
 import { decideComputerStart } from "@/lib/computerClient";
 import BusinessDNAPanel from "@/components/BusinessDNAPanel";
@@ -704,7 +700,9 @@ export default function HomePage() {
       return;
     }
 
-    const usageCheck = await canSendMessage(user.uid);
+    const uid = user.uid;
+
+    const usageCheck = await canSendMessage(uid);
     if (!usageCheck.allowed) {
       setUsageLimitError(
         `You've hit your plan's daily limit (${usageCheck.used}/${usageCheck.limit} messages today). Upgrade for more.`
@@ -725,15 +723,15 @@ export default function HomePage() {
 
     let currentChatId = chatId;
     if (!currentChatId) {
-      currentChatId = await createChat(user.uid, task);
+      currentChatId = await createChat(uid, task);
       setChatId(currentChatId);
-      getAgentIdentity(user.uid, currentChatId).then(setAgentIdentity);
+      getAgentIdentity(uid, currentChatId).then(setAgentIdentity);
     }
 
     const intent = await detectScheduleIntent(provider.id, activeKey, task, model);
     if (intent) {
       const runAt = nextOccurrence(intent.time);
-      await addScheduledTask(user.uid, intent.taskMessage, runAt, intent.recurrence, currentChatId);
+      await addScheduledTask(uid, intent.taskMessage, runAt, intent.recurrence, currentChatId);
       const confirmation: ChatMessage = {
         role: "assistant",
         content: `Done — I've scheduled "${intent.taskMessage}" to run ${
@@ -748,8 +746,7 @@ export default function HomePage() {
 
     // Durable server-side Agent Runtime: the browser is now only the UI.
     // The job is persisted before execution, so a closed tab can no longer
-    // cancel the agent's state. The old specialist/mission code below remains
-    // as a compatibility fallback, but normal tasks use this runtime first.
+    // cancel the agent's state. All normal tasks now use this durable runtime.
     await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
     setSending(true);
     setWorkingLabel("Agent is working autonomously…");
@@ -772,9 +769,9 @@ export default function HomePage() {
       } else if (job?.status === "failed") {
         setMessages([...nextMessages, { role: "assistant", content: `I couldn't complete that task. **Error:** ${job.error || "unknown error"}` }]);
       }
-      const refreshed = await getChat(user.uid, currentChatId);
+      const refreshed = await getChat(uid, currentChatId);
       if (refreshed) setMessages(refreshed.messages);
-      await incrementTodayUsage(user.uid);
+      await incrementTodayUsage(uid);
     } catch (err) {
       setError(err instanceof Error ? err.message : "The Agent Runtime failed.");
     } finally {
@@ -783,129 +780,6 @@ export default function HomePage() {
       setAgentStatus(null);
     }
     return;
-
-    // A big, multi-part request ("build a site AND find leads AND email
-    // them...") gets a small team instead of one specialist. Cheap regex
-    // check first; only asks the model to actually plan it out when that
-    // heuristic says it's plausible.
-    if (looksLikeMissionTask(task)) {
-      const [missionToolIds, missionIntKeys] = await Promise.all([
-        listConnectedPluginIds(user.uid),
-        getIntegrationKeys(user.uid),
-      ]);
-      const tasks = await planMission(provider.id, activeKey, task, model);
-      const rolesUsed = new Set(tasks.map((t) => t.role));
-      const looksLikeRealTeamwork = tasks.length >= 3 && (rolesUsed.size >= 3 || tasks.filter((t) => t.dependsOn.length === 0).length >= 2);
-
-      if (looksLikeRealTeamwork) {
-        const missionId = await createMission(user.uid, task, tasks, currentChatId);
-        const kickoff: ChatMessage = {
-          role: "assistant",
-          content: `This needs a small team — splitting it into ${tasks.length} parts:\n${tasks
-            .map((t) => `- **${t.role}**: ${t.title}`)
-            .join("\n")}\n\nOpen **Agent Team** (next to Settings) to watch it live — I'll post the summary here when it's done.`,
-        };
-        const finalMessages = [...nextMessages, kickoff];
-        setMessages(finalMessages);
-        await persist(finalMessages, currentChatId, activeAgent?.id, provider.id);
-
-        const missionDeps: MissionExecutorDeps = {
-          uid: user.uid,
-          providerId: provider.id,
-          apiKey: activeKey,
-          model,
-          hasBrowser: !!missionIntKeys.browserlessApiKey,
-          hasDaytona: !!missionIntKeys.daytonaApiKey,
-          gmailConnected: missionToolIds.includes("gmail"),
-          calendarConnected: missionToolIds.includes("google-calendar"),
-        };
-        runMission(missionDeps, missionId);
-        setMissionFlowOpen(true);
-        return;
-      }
-      // Not actually a multi-agent job (e.g. planner returned 1-2 simple
-      // steps) — fall through and handle it as a normal message below.
-    }
-
-    // Refresh immediately before routing. A connection made seconds ago must be
-    // visible to the agent even if the 8-second background sync has not fired yet.
-    const freshTools = await refreshToolState();
-    const effectiveToolIds = effectiveConnectedToolIds(freshTools.toolIds, freshTools.servers);
-    const need = await detectToolNeed(provider.id, activeKey, nextMessages, effectiveToolIds, model);
-    const emailTask = /email|gmail|outlook|mail/i.test(`${task} ${need?.toolName || ""}`);
-    let browserCanFallback = false;
-    if (emailTask && !need?.connected && freshTools.intKeys.browserlessApiKey) {
-      const profiles = await listBrowserProfiles().catch(() => []);
-      const matchingProfile = profiles.find((p) => /gmail|mail|outlook|email/i.test(p.name));
-      if (matchingProfile) browserCanFallback = true;
-      else {
-        setCapabilityNeed("browserProfile");
-        setPendingTaskAfterConnect(task);
-        await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
-        return;
-      }
-    }
-    if (need && !need.connected && !browserCanFallback) {
-      setToolNeed(need);
-      setPendingTaskAfterConnect(task);
-      await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
-      return;
-    }
-
-    // Route every task to a specialist before execution so the UI and runtime stay synchronized.
-    setClassifying(true);
-    const selectedAgent = await classifyAgent(provider.id, activeKey, task, model);
-    setClassifying(false);
-    setActiveAgent(selectedAgent);
-
-    const myConnectedAgents = agentConnections
-      .filter((c) => c.sourceChatId === currentChatId)
-      .flatMap((c) => c.targetChatIds)
-      .map((tid) => ({ chatId: tid, name: chats.find((c) => c.id === tid)?.title || tid }));
-
-    const autoDecision = await decideAutoTools(
-      provider.id,
-      activeKey,
-      task,
-      !!freshTools.intKeys.browserlessApiKey,
-      !!freshTools.intKeys.daytonaApiKey,
-      myConnectedAgents,
-      model
-    );
-
-    if (autoDecision.browserUnavailable) {
-      setCapabilityNeed("browser");
-      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
-      return;
-    }
-    if (autoDecision.computerUnavailable) {
-      setCapabilityNeed("computer");
-      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
-      return;
-    }
-
-    if (autoDecision.installSkillUrl) {
-      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
-      await handleAutoInstallSkill(autoDecision.installSkillUrl, nextMessages, currentChatId);
-      return;
-    }
-
-    const needsRealWork = autoDecision.needsBrowser || autoDecision.needsComputer || /\b(build|create|make|develop|code|website|app|game|deploy|edit|fix|debug|send|reply|post|book|schedule)\b/i.test(task);
-    if (needsRealWork) {
-      const toolsSummary = [
-        autoDecision.needsBrowser ? "a real web browser" : null,
-        autoDecision.needsComputer ? "a persistent cloud computer + terminal" : null,
-        !autoDecision.needsBrowser && !autoDecision.needsComputer ? "the agent workspace, files, terminal and connected tools" : null,
-      ].filter(Boolean).join(" and ");
-      const plan = await generateTaskPlan(provider.id, activeKey, task, toolsSummary, model);
-      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
-      if (plan?.steps?.length) {
-        setPendingPlan({ task, attachments, autoDecision, steps: plan.steps, chatId: currentChatId });
-        return;
-      }
-    }
-
-    await executeTask(task, attachments, currentChatId, autoDecision);
   }
 
   async function executeTask(
