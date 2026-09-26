@@ -1,22 +1,28 @@
 // app/api/preview/[token]/[[...path]]/route.ts
-// Fixes the "Preview URL Warning" interstitial appearing INSIDE Codespace's
-// live-preview iframe and the Cloud Computer live view: both used to hand
-// the browser Daytona's raw signed preview URL directly, so Daytona's own
-// click-through warning page rendered inside the iframe instead of the real
-// app/desktop. This route fetches Daytona's preview with the
-// X-Daytona-Skip-Preview-Warning header server-side (which is exactly what
-// that header is for) and streams the real content back same-origin, so the
-// warning never appears — no click needed.
+// Fixes two real bugs found in testing:
 //
-// Auth: a short-lived signed token (lib/previewToken.ts) instead of a
-// Firebase ID token, because an <iframe src> can't send an Authorization
-// header. The token is scoped to one (uid, sandboxId, port) and expires.
+// 1) THE 502/GARBLED-TEXT BUG. The old code injected the WebSocket shim
+//    whenever `!realPath` (i.e. the root request "/"), regardless of what
+//    Daytona actually returned. When a dev server hadn't started listening
+//    yet (or was still mid-compile on a bigger project), Daytona's own edge
+//    returns a small JSON error ({"statusCode":502,...}); the old code still
+//    treated that as HTML and glued a raw <script> tag in front of it,
+//    which the browser then rendered as literal text — exactly what showed
+//    up in Codespace's preview. Fixed: the shim is only injected when the
+//    response is ACTUALLY HTML (by real content-type or a .html path).
 //
-// This proxies plain HTTP assets (HTML/CSS/JS/images). It cannot proxy a
-// WebSocket itself (Vercel serverless functions don't hold one open), so any
-// HTML response gets a small shim that redirects WebSocket connections
-// straight to the real Daytona host — this is what makes noVNC (Cloud
-// Computer) and a dev server's HMR socket keep working through the proxy.
+// 2) "WORKS SOMETIMES, NOT WHEN THERE ARE MANY FILES." A bigger project's
+//    first `npm run dev`/`vite`/`next dev` can take anywhere from a few
+//    seconds to well over a minute to finish its first compile, during
+//    which Daytona's proxy answers with 502/503/504. There was no retry, so
+//    the first request after starting the server just failed permanently.
+//    Fixed: transient 5xx responses are retried for up to ~25s; if it's
+//    still not up after that, a small auto-refreshing HTML page is served
+//    instead of raw error JSON, so the iframe keeps trying on its own.
+//
+// This same route also serves the Cloud Computer live view (VNC), which is
+// why the WebSocket shim exists at all — noVNC needs it to reach the real
+// Daytona host from behind this proxy.
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifyPreviewToken } from "@/lib/previewToken";
@@ -27,6 +33,11 @@ export const maxDuration = 30;
 
 const SKIP_HEADERS = { "X-Daytona-Skip-Preview-Warning": "true" };
 const TEXT_LIKE = /\.(html?|css|js|mjs|json|svg|xml|txt|map)$/i;
+const RETRY_STATUSES = new Set([502, 503, 504]);
+const MAX_RETRIES = 6;
+const RETRY_DELAY_MS = 1500;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Per-instance cache so a page with many assets doesn't re-resolve the
 // signed Daytona URL on every single request. Best-effort only — serverless
@@ -46,6 +57,14 @@ async function resolveBaseUrl(uid: string, sandboxId: string, port: number): Pro
   return url;
 }
 
+function startingUpPage(prefix: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="2"><style>
+html,body{height:100%;margin:0;background:#111;color:#aaa;font:14px ui-monospace,Menlo,monospace;display:flex;align-items:center;justify-content:center}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#0a84ff;margin-right:8px;animation:p 1s ease-in-out infinite}
+@keyframes p{0%,100%{opacity:.3}50%{opacity:1}}
+</style></head><body><div><span class="dot"></span>Still starting the server… this page refreshes itself.</div></body></html>`;
+}
+
 export async function GET(req: NextRequest, { params }: { params: { token: string; path?: string[] } }) {
   const payload = verifyPreviewToken(params.token);
   if (!payload) {
@@ -56,9 +75,25 @@ export async function GET(req: NextRequest, { params }: { params: { token: strin
     const base = await resolveBaseUrl(payload.uid, payload.sandboxId, payload.port);
     const realPath = (params.path || []).join("/");
     const upstreamUrl = `${base}/${realPath}${req.nextUrl.search}`;
-
-    const upstream = await fetch(upstreamUrl, { headers: SKIP_HEADERS, redirect: "manual" });
     const prefix = `/api/preview/${params.token}`;
+
+    let upstream: Response | null = null;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      upstream = await fetch(upstreamUrl, { headers: SKIP_HEADERS, redirect: "manual" }).catch(() => null);
+      if (upstream && !RETRY_STATUSES.has(upstream.status)) break;
+      if (attempt < MAX_RETRIES) await sleep(RETRY_DELAY_MS);
+    }
+
+    if (!upstream) {
+      return new NextResponse("Couldn't reach the cloud workspace. Try again in a few seconds.", { status: 502 });
+    }
+
+    if (RETRY_STATUSES.has(upstream.status)) {
+      // Still not up after ~10s of retrying — hand back a page that keeps
+      // trying on its own instead of a dead error screen.
+      return new NextResponse(startingUpPage(prefix), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+    }
+
     const contentType = upstream.headers.get("content-type") || "application/octet-stream";
 
     if (upstream.status >= 300 && upstream.status < 400) {
@@ -69,14 +104,18 @@ export async function GET(req: NextRequest, { params }: { params: { token: strin
       return NextResponse.redirect(target, upstream.status);
     }
 
-    const isText = TEXT_LIKE.test(realPath) || /text|javascript|json|html|css|xml/.test(contentType);
+    // Only ever treat a response as HTML (and inject the WebSocket shim)
+    // when it genuinely IS HTML — never inferred just because the path was
+    // the bare root. This is the fix for the garbled-JSON bug.
+    const isHtml = /html/i.test(contentType) || /\.html?$/i.test(realPath);
+    const isText = isHtml || TEXT_LIKE.test(realPath) || /text|javascript|json|css|xml/.test(contentType);
 
     if (isText) {
       let text = await upstream.text();
       text = text.replace(/((?:src|href)=["'])\/(?!\/)/g, `$1${prefix}/`);
       text = text.replace(/url\((["']?)\/(?!\/)/g, `url($1${prefix}/`);
 
-      if (/html/i.test(contentType) || /\.html?$/i.test(realPath) || !realPath) {
+      if (isHtml) {
         const u = new URL(base);
         const wsShim = `<script>(function(){
 var H="${u.host}",P="${u.protocol === "https:" ? "wss:" : "ws:"}",PFX=${JSON.stringify(prefix)};
