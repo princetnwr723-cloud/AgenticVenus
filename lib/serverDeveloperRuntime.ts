@@ -1,5 +1,4 @@
-// Server-side Developer Agent.
-// Runs coding tasks inside the user's persistent Daytona workspace.
+// lib/serverDeveloperRuntime.ts
 
 import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
 import { extractCodeFiles } from "@/lib/codeExtract";
@@ -14,6 +13,7 @@ import {
   workspaceFreePort,
   workspacePreview,
 } from "@/lib/workspaceRuntime";
+import { portForScope } from "@/lib/workspaceScope";
 
 export type ServerDeveloperResult = {
   changedFiles: string[];
@@ -24,15 +24,24 @@ export type ServerDeveloperResult = {
   steps: string[];
 };
 
-const safePath = (p: string) => {
-  const clean = p
+const MAX_CONTEXT_CHARS = 60000;
+
+/**
+ * Prevent the model from writing outside the workspace.
+ */
+function safePath(path: string): string | null {
+  const clean = String(path || "")
     .replace(/\\/g, "/")
-    .replace(/^\.?\/+/, "")
-    .replace(/^workspace\//, "");
+    .replace(/^\/+/, "")
+    .replace(/^\.\/+/, "")
+    .trim();
+
+  if (!clean) return null;
 
   if (
-    !clean ||
-    clean.includes("..") ||
+    clean.includes("../") ||
+    clean === ".." ||
+    clean.startsWith("../") ||
     clean.startsWith("~") ||
     clean.startsWith("/")
   ) {
@@ -40,97 +49,157 @@ const safePath = (p: string) => {
   }
 
   return clean;
-};
+}
 
-function buildPrompt(
+/**
+ * Build the developer-agent prompt.
+ */
+function buildDeveloperPrompt(
   task: string,
   history: ChatMessage[],
-  existing: string,
-  skills: string
-) {
-  const fence = "```";
-
-  const context = history
-    .slice(-8)
-    .map((m) => `${m.role}: ${m.content.slice(0, 1500)}`)
-    .join("\n");
+  existingFiles: string,
+  installedSkills: string
+): string {
+  const recentHistory = history
+    .slice(-10)
+    .map((message) => {
+      return `${message.role.toUpperCase()}:\n${message.content.slice(
+        0,
+        2500
+      )}`;
+    })
+    .join("\n\n");
 
   return `${AGENT_CORE}
 
-You are the Developer Agent working inside a real persistent Linux cloud workspace.
-
-Your job is to actually implement the user's request.
-
-You have access to a persistent workspace containing the user's project.
-
-Rules:
-
-1. Inspect the existing project before changing it.
-2. Preserve existing functionality.
-3. Do not rewrite unrelated files.
-4. Return complete files, never partial snippets.
-5. Use safe relative file paths.
-6. Prefer minimal, production-quality changes.
-7. Keep the existing framework and architecture unless the task requires otherwise.
-8. Do not invent APIs or packages that are not available.
-9. Make the implementation actually runnable.
-10. After implementation the runtime will build/test the project.
-11. If a build error occurs, the agent can be called again to repair it.
-
 ${DEV_CRAFT_GUIDE}
 
-${skills ? `\nAVAILABLE SKILLS:\n${skills}\n` : ""}
+You are the autonomous Developer Agent operating inside a REAL persistent cloud workspace.
 
-USER TASK:
+The user's task is:
+
 ${task}
 
-RECENT CONTEXT:
-${context || "(none)"}
+YOUR RESPONSIBILITY
 
-EXISTING WORKSPACE:
-${existing || "(empty)"}
+You must actually implement the user's request in the existing workspace.
 
-Return ONLY complete files that must be created or changed.
+Do not merely explain how to do it.
 
-For every changed file use exactly:
+WORKSPACE RULES
+
+1. Inspect the existing project before making changes.
+2. Preserve existing functionality.
+3. Do not rewrite unrelated files.
+4. Do not delete working features unless the user's task explicitly requires it.
+5. Use the existing framework and dependencies whenever possible.
+6. Do not invent unavailable packages or APIs.
+7. Write production-quality code.
+8. Handle loading, error and empty states where appropriate.
+9. Keep TypeScript types correct.
+10. Do not leave TODOs or fake implementations.
+11. Do not return partial files.
+12. Return complete contents for every file you change.
+13. Use only safe relative file paths.
+14. After the files are written, the server runtime will run the project build.
+15. If the build fails, a repair pass will be performed.
+
+FILE OUTPUT FORMAT
+
+Return ONLY files that need to be created or changed.
+
+For each file use:
 
 FILE: path/to/file.ext
-${fence}language
-complete file contents
-${fence}
+\`\`\`language
+COMPLETE FILE CONTENT
+\`\`\`
 
-Never return partial files.
-Never use unsafe paths.
-Never include explanations outside the file blocks.
+Example:
+
+FILE: app/page.tsx
+\`\`\`tsx
+export default function Page() {
+  return <main>Hello</main>;
+}
+\`\`\`
+
+IMPORTANT
+
+- Never return a partial file.
+- Never use "...".
+- Never use placeholder code.
+- Never use unsafe paths.
+- Never put explanations outside the file blocks.
+
+${
+  installedSkills
+    ? `AVAILABLE SKILLS:\n${installedSkills}\n`
+    : ""
+}
+
+RECENT CONVERSATION:
+
+${recentHistory || "(no recent conversation)"}
+
+CURRENT WORKSPACE:
+
+${existingFiles || "(workspace is empty)"}
 `;
 }
 
-async function waitForPort(
-  uid: string,
-  preferred: number,
-  before: number[],
-  tries = 20
-) {
-  const baseline = new Set(before);
+/**
+ * Convert workspace files into compact model context.
+ */
+function serializeWorkspaceFiles(
+  files: Array<{ path: string; content?: string }>
+): string {
+  let used = 0;
+  const chunks: string[] = [];
 
-  for (let i = 0; i < tries; i++) {
-    const ports = await workspaceListeningPorts(uid).catch(() => ({
-      ports: [] as number[],
-    }));
+  for (const file of files) {
+    const content = String(file.content || "");
 
-    if (ports.ports.includes(preferred)) {
-      return preferred;
+    if (!content) {
+      chunks.push(`FILE: ${file.path}\n(empty)`);
+      continue;
     }
 
-    const fresh = ports.ports.find(
-      (p) =>
-        !baseline.has(p) &&
-        p >= 3000 &&
-        p <= 9999
+    if (used >= MAX_CONTEXT_CHARS) {
+      chunks.push(`FILE: ${file.path}\n(content omitted due to context limit)`);
+      continue;
+    }
+
+    const remaining = MAX_CONTEXT_CHARS - used;
+    const clipped = content.slice(0, Math.min(remaining, 12000));
+
+    chunks.push(
+      `FILE: ${file.path}\n\`\`\`\n${clipped}\n\`\`\``
     );
 
-    if (fresh) {
-      return fresh;
+    used += clipped.length;
+  }
+
+  return chunks.join("\n\n");
+}
+
+/**
+ * Wait until a development server becomes visible on the expected port.
+ */
+async function waitForPort(
+  uid: string,
+  expectedPort: number,
+  attempts = 25
+): Promise<number | null> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const result = await workspaceListeningPorts(uid);
+
+      if (result.ports.includes(expectedPort)) {
+        return expectedPort;
+      }
+    } catch {
+      // The sandbox may still be starting the process.
     }
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -139,69 +208,103 @@ async function waitForPort(
   return null;
 }
 
-async function runBuild(
+/**
+ * Run npm build.
+ *
+ * IMPORTANT:
+ * workspaceExec returns `output`, not stdout/stderr.
+ */
+async function runProductionBuild(
   uid: string,
   scope: string,
-  onStep?: (step: string) => Promise<void> | void
+  onStep?: (message: string) => Promise<void> | void
 ) {
-  await onStep?.("🔨 Running production build…");
+  await onStep?.("🔨 Running production build...");
 
   const result = await workspaceExec(
     uid,
     "npm run build",
-    scope
+    scope,
+    300
   );
 
   return {
     ok: result.exitCode === 0,
-    output: `${result.stdout || ""}\n${result.stderr || ""}`.trim(),
+    output: String(result.output || ""),
   };
 }
 
-async function startPreview(
+/**
+ * Start the user's development server on the stable port assigned
+ * to this workspace scope.
+ */
+async function startDevelopmentServer(
   uid: string,
   scope: string,
-  onStep?: (step: string) => Promise<void> | void
+  onStep?: (message: string) => Promise<void> | void
 ) {
-  await onStep?.("🚀 Starting the development server…");
+  await onStep?.("🚀 Starting the development server...");
 
-  const beforeResult = await workspaceListeningPorts(uid).catch(() => ({
-    ports: [] as number[],
-  }));
+  /*
+   * Each workspace scope receives a stable port.
+   *
+   * This prevents two chats from fighting over port 3000.
+   */
+  const port = portForScope(scope, false);
 
-  const before = beforeResult.ports;
+  /*
+   * Free only this exact port.
+   *
+   * We never run broad pkill commands because the same Daytona
+   * sandbox can contain multiple workspace scopes.
+   */
+  await workspaceFreePort(uid, port);
 
-  let preferred = 3000;
+  const sessionId = `developer-preview-${scope || "global"}`;
+
+  /*
+   * Next.js accepts:
+   *
+   * npm run dev -- --hostname 0.0.0.0 --port PORT
+   *
+   * The command is intentionally run asynchronously so the HTTP
+   * request does not wait forever for the dev server.
+   */
+  const command =
+    `npm run dev -- --hostname 0.0.0.0 --port ${port}`;
 
   try {
-    const free = await workspaceFreePort(uid, 3000);
+    await workspaceSessionExec(
+      uid,
+      sessionId,
+      command,
+      scope,
+      true
+    );
+  } catch (error) {
+    /*
+     * If a dev server is already running in this scope, we still
+     * continue and check the port.
+     */
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
 
-    if (typeof free === "number" && free > 0) {
-      preferred = free;
-    }
-  } catch {
-    // Keep 3000 as fallback.
+    await onStep?.(
+      `ℹ️ Development server start returned: ${message}`
+    );
   }
 
-  const command =
-    `npm run dev -- --hostname 0.0.0.0 --port ${preferred}`;
-
-  await workspaceSessionExec(
+  const detectedPort = await waitForPort(
     uid,
-    command,
-    scope
+    port,
+    30
   );
 
-  const port = await waitForPort(
-    uid,
-    preferred,
-    before,
-    25
-  );
-
-  if (!port) {
+  if (!detectedPort) {
     await onStep?.(
-      "⚠️ Development server did not expose a listening port."
+      "⚠️ Development server did not become available."
     );
 
     return {
@@ -211,27 +314,47 @@ async function startPreview(
   }
 
   await onStep?.(
-    `🌐 Development server is running on port ${port}.`
+    `🌐 Development server is running on port ${detectedPort}.`
   );
 
-  let previewUrl: string | undefined;
-
+  /*
+   * workspacePreview returns:
+   *
+   * {
+   *   sandboxId,
+   *   port,
+   *   url
+   * }
+   */
   try {
-    previewUrl = await workspacePreview(
+    const preview = await workspacePreview(
       uid,
-      port,
-      scope
+      detectedPort
     );
-  } catch {
-    previewUrl = undefined;
-  }
 
-  return {
-    port,
-    previewUrl,
-  };
+    return {
+      port: detectedPort,
+      previewUrl: preview.url,
+    };
+  } catch (error) {
+    await onStep?.(
+      `⚠️ Preview URL could not be generated: ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    );
+
+    return {
+      port: detectedPort,
+      previewUrl: undefined,
+    };
+  }
 }
 
+/**
+ * Main autonomous developer runtime.
+ */
 export async function runServerDeveloperWorkspace(
   uid: string,
   providerId: string,
@@ -241,7 +364,7 @@ export async function runServerDeveloperWorkspace(
   history: ChatMessage[],
   scope: string,
   installedSkills = "",
-  onStep?: (step: string) => Promise<void> | void
+  onStep?: (message: string) => Promise<void> | void
 ): Promise<ServerDeveloperResult> {
   const steps: string[] = [];
 
@@ -250,53 +373,72 @@ export async function runServerDeveloperWorkspace(
     await onStep?.(message);
   };
 
-  await step("💻 Preparing the persistent development workspace…");
+  /*
+   * ------------------------------------------------------------
+   * 1. Prepare persistent Daytona workspace
+   * ------------------------------------------------------------
+   */
+
+  await step(
+    "💻 Preparing the persistent Daytona development workspace..."
+  );
 
   const workspace = await ensureWorkspace(uid);
 
   await step(
-    `Persistent workspace ready: ${workspace.sandboxId.slice(
+    `☁️ Connected to persistent workspace ${workspace.sandboxId.slice(
       0,
-      10
-    )}…`
+      12
+    )}...`
   );
 
-  const existingFiles = await workspaceListFiles(
+  /*
+   * ------------------------------------------------------------
+   * 2. Inspect project
+   * ------------------------------------------------------------
+   */
+
+  await step(
+    "🔎 Inspecting the existing project..."
+  );
+
+  /*
+   * IMPORTANT:
+   * workspaceListFiles returns { files }, not a direct array.
+   */
+  const listing = await workspaceListFiles(
     uid,
     true,
     scope
-  ).catch(() => []);
+  );
 
-  let budget = 60000;
+  const existingFiles = Array.isArray(listing.files)
+    ? listing.files
+    : [];
 
-  const existing = existingFiles
-    .slice(0, 60)
-    .map((file) => {
-      const body = (file.content || "").slice(0, 8000);
+  const existingContext =
+    serializeWorkspaceFiles(existingFiles);
 
-      budget -= body.length;
+  /*
+   * ------------------------------------------------------------
+   * 3. Ask the connected model to implement the task
+   * ------------------------------------------------------------
+   */
 
-      if (budget <= 0) {
-        return `FILE: ${file.path} (omitted)`;
-      }
+  await step(
+    "🧠 Planning the implementation..."
+  );
 
-      return `FILE: ${file.path}
-\`\`\`
-${body}
-\`\`\``;
-    })
-    .join("\n\n");
-
-  await step("🧠 Inspecting the existing project…");
-
-  const prompt = buildPrompt(
+  const prompt = buildDeveloperPrompt(
     task,
     history,
-    existing,
+    existingContext,
     installedSkills
   );
 
-  await step("✍️ Generating the implementation…");
+  await step(
+    "✍️ Generating the implementation..."
+  );
 
   const response = await sendChatMessage({
     providerId,
@@ -310,32 +452,54 @@ ${body}
     ],
   });
 
-  let files = extractCodeFiles([
+  const generatedFiles = extractCodeFiles([
     {
       role: "assistant",
       content: response.text || "",
     },
-  ]).filter(
-    (file) =>
-      !/^snippet-/i.test(file.filename)
-  );
+  ]);
 
-  if (!files.length) {
+  if (!generatedFiles.length) {
     throw new Error(
       "Developer Agent returned no editable files."
     );
   }
 
+  /*
+   * ------------------------------------------------------------
+   * 4. Write files
+   * ------------------------------------------------------------
+   */
+
   const changedFiles: string[] = [];
 
-  for (const file of files) {
+  for (const file of generatedFiles) {
     const path = safePath(file.filename);
 
     if (!path) {
+      await step(
+        `⚠️ Skipped unsafe file path: ${file.filename}`
+      );
       continue;
     }
 
-    await step(`📝 Updating ${path}…`);
+    /*
+     * Prevent accidental overwriting of environment secrets.
+     */
+    if (
+      path === ".env" ||
+      path.startsWith(".env.") &&
+      path !== ".env.example"
+    ) {
+      await step(
+        `🔐 Skipped protected environment file: ${path}`
+      );
+      continue;
+    }
+
+    await step(
+      `📝 Writing ${path}...`
+    );
 
     await workspaceWriteFile(
       uid,
@@ -349,7 +513,7 @@ ${body}
 
   if (!changedFiles.length) {
     throw new Error(
-      "Developer Agent returned only unsafe or invalid file paths."
+      "Developer Agent returned no safe files to write."
     );
   }
 
@@ -359,11 +523,23 @@ ${body}
     }.`
   );
 
-  let build = await runBuild(
+  /*
+   * ------------------------------------------------------------
+   * 5. Build
+   * ------------------------------------------------------------
+   */
+
+  let build = await runProductionBuild(
     uid,
     scope,
     step
   );
+
+  /*
+   * ------------------------------------------------------------
+   * 6. Automatic repair
+   * ------------------------------------------------------------
+   */
 
   let repairAttempts = 0;
 
@@ -371,41 +547,48 @@ ${body}
     repairAttempts++;
 
     await step(
-      `❌ Build failed. Repair attempt ${repairAttempts}/2…`
+      `❌ Build failed. Starting automatic repair ${repairAttempts}/2...`
     );
 
     const repairPrompt = `${AGENT_CORE}
 
-You are repairing a real project inside a persistent cloud workspace.
+You are the repair engineer for a REAL project inside a persistent cloud workspace.
 
-The user's original task was:
+ORIGINAL USER TASK:
 
 ${task}
 
-Files changed during the previous implementation:
+FILES CURRENTLY CHANGED:
 
 ${changedFiles.join("\n")}
 
-The production build failed with:
+PRODUCTION BUILD ERROR:
 
-${build.output.slice(-12000)}
+${build.output.slice(-16000)}
 
-Fix the build error while preserving the requested functionality.
+YOUR JOB:
 
-Return ONLY the complete files that must be changed.
+Fix the actual build/type/runtime error.
 
-For every file:
+Do not rewrite unrelated functionality.
+
+Do not invent packages.
+
+Return ONLY COMPLETE FILES that need changing.
+
+Format:
 
 FILE: path/to/file.ext
 \`\`\`language
-complete file
+COMPLETE FILE CONTENT
 \`\`\`
 
 Never return partial files.
 Never use unsafe paths.
+Never explain the fix outside the file blocks.
 `;
 
-    const repair = await sendChatMessage({
+    const repairResponse = await sendChatMessage({
       providerId,
       apiKey,
       model,
@@ -420,9 +603,16 @@ Never use unsafe paths.
     const repairFiles = extractCodeFiles([
       {
         role: "assistant",
-        content: repair.text || "",
+        content: repairResponse.text || "",
       },
     ]);
+
+    if (!repairFiles.length) {
+      await step(
+        "⚠️ Repair model returned no files."
+      );
+      break;
+    }
 
     for (const file of repairFiles) {
       const path = safePath(file.filename);
@@ -431,7 +621,17 @@ Never use unsafe paths.
         continue;
       }
 
-      await step(`🔧 Repairing ${path}…`);
+      if (
+        path === ".env" ||
+        (path.startsWith(".env.") &&
+          path !== ".env.example")
+      ) {
+        continue;
+      }
+
+      await step(
+        `🔧 Repairing ${path}...`
+      );
 
       await workspaceWriteFile(
         uid,
@@ -445,12 +645,18 @@ Never use unsafe paths.
       }
     }
 
-    build = await runBuild(
+    build = await runProductionBuild(
       uid,
       scope,
       step
     );
   }
+
+  /*
+   * ------------------------------------------------------------
+   * 7. Stop if build is still broken
+   * ------------------------------------------------------------
+   */
 
   if (!build.ok) {
     await step(
@@ -466,10 +672,16 @@ Never use unsafe paths.
   }
 
   await step(
-    "✅ Production build passed."
+    "✅ Production build passed successfully."
   );
 
-  const preview = await startPreview(
+  /*
+   * ------------------------------------------------------------
+   * 8. Start live preview
+   * ------------------------------------------------------------
+   */
+
+  const preview = await startDevelopmentServer(
     uid,
     scope,
     step
@@ -477,9 +689,15 @@ Never use unsafe paths.
 
   if (preview.previewUrl) {
     await step(
-      "🌐 Live preview is ready."
+      "🟢 Live preview is ready."
     );
   }
+
+  /*
+   * ------------------------------------------------------------
+   * 9. Final result
+   * ------------------------------------------------------------
+   */
 
   return {
     changedFiles,
