@@ -2,29 +2,43 @@
 // Real browser automation via Browserless — connects a remote Chrome over CDP
 // with the user's own token.
 //
-// WHY THE AGENT USED TO CLICK BELOW THE SEARCH ICON
-//  1. The page had no fixed viewport, so the screenshot size was whatever
-//     Browserless picked, while the model guessed coordinates for a picture it
-//     had silently downscaled. Every click landed off-target.
-//  2. The model had to "eyeball" pixel positions from a JPEG.
-// FIX
-//  - The viewport is pinned to 1280x800 at deviceScaleFactor 1, and the
-//    screenshot is exactly that size, so screenshot pixels == page pixels.
-//  - After every action we also return a numbered map of the visible,
-//    genuinely clickable elements (centre x/y already computed from the live
-//    DOM). The model can say "click element 7" and we click its true centre.
-//  - New `search` and `back` actions, `type` with submit/clear, real mouse-wheel
-//    scrolling, and a settle step so screenshots are taken after the page loads.
+// CAPTCHA / "I'm not a robot" FIX
+//  Browserless's plain connection endpoint has no anti-detection at all, so
+//  ordinary automated traffic (especially hitting Google search directly)
+//  reliably tripped bot-checks. Two real Browserless features fix this:
+//   - the `/stealth` route: fingerprint randomization + automation-signal
+//     hiding (free, no extra cost)
+//   - `solveCaptchas=true`: Browserless detects and solves reCAPTCHA /
+//     Cloudflare / hCaptcha challenges INSIDE the session automatically.
+//     Per Browserless's own docs this only bills (a small per-solve unit
+//     cost) on a SUCCESSFUL solve — a challenge it can't clear costs nothing.
+//  Combined with defaulting web searches to DuckDuckGo instead of Google
+//  (already the default below — Google is by far the most aggressive at
+//  flagging automated traffic), this is what actually gets past the
+//  checkbox/captcha wall instead of getting stuck on it.
 //
-// SESSION ACROSS SERVERLESS REQUESTS: `Browserless.reconnect` hands back a
-// session-specific endpoint that survives a disconnect (max 120s). Every action
-// renews it, so an actively used session stays alive.
+// SESSION LENGTH
+//  Browserless session/reconnect limits are plan-based (free plan: ~1-2
+//  minutes; paid plans scale up to 30-60 minutes). We now explicitly ask for
+//  a 30-minute session and a 30-minute reconnect window on every connection —
+//  Browserless silently caps this to whatever the account's plan actually
+//  allows, so this is always safe to request regardless of plan.
+//
+// WHY THE AGENT USED TO CLICK BELOW THE SEARCH ICON (kept from the previous
+// fix): the viewport is pinned to 1280x800 at deviceScaleFactor 1, so
+// screenshot pixels always equal page pixels, and every action response also
+// returns a numbered map of the visible clickable elements with their real
+// centre coordinates so the model can say "click element 7" instead of
+// guessing pixels.
 
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { adminDb } from "@/lib/firebaseAdmin";
 
 const REGION = "production-sfo.browserless.io";
-const SESSION_TIMEOUT_MS = 110_000; // Browserless's hard cap is 120000ms
+// Requested session/reconnect length — Browserless clamps this to the
+// account's actual plan limit, so asking for the max is always safe.
+const REQUESTED_SESSION_MS = 30 * 60 * 1000;
+const NAV_TIMEOUT_MS = 45_000; // generous — captcha-solving needs real time to run
 
 export const BROWSER_VIEWPORT = { width: 1280, height: 800 };
 
@@ -61,9 +75,17 @@ export type BrowserActionResult = {
   title?: string;
   width: number;
   height: number;
+  /** Heuristic: the page looks like a bot-check/captcha wall right now. */
+  captchaLikely?: boolean;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function connectionUrl(apiKey: string, extra = ""): string {
+  // /stealth = anti-detection route. solveCaptchas=true = automatic
+  // challenge solving (billed only when it actually solves one).
+  return `wss://${REGION}/stealth?token=${apiKey}&solveCaptchas=true&timeout=${REQUESTED_SESSION_MS}${extra}`;
+}
 
 async function saveSession(uid: string, sessionId: string, reconnectEndpoint: string) {
   await adminDb().collection("users").doc(uid).collection("browserSessions").doc(sessionId).set({
@@ -79,15 +101,16 @@ async function loadReconnectEndpoint(uid: string, sessionId: string): Promise<st
 }
 
 /** Calls Browserless.reconnect on an already-connected browser and returns a
- * fresh, token-bearing endpoint good for another SESSION_TIMEOUT_MS. */
+ * fresh, token-bearing endpoint — requests the full 30 minutes; Browserless
+ * clamps this to whatever the plan actually allows. */
 async function refreshReconnectEndpoint(browser: Browser, apiKey: string): Promise<string> {
   const page = (await browser.pages())[0] || (await browser.newPage());
   const cdp = await page.createCDPSession();
   const { error, browserWSEndpoint } = (await cdp.send("Browserless.reconnect" as any, {
-    timeout: SESSION_TIMEOUT_MS,
+    timeout: REQUESTED_SESSION_MS,
   } as any)) as { error?: string; browserWSEndpoint?: string };
   if (error || !browserWSEndpoint) throw new Error(error || "Browserless didn't return a reconnect endpoint.");
-  return `${browserWSEndpoint}?token=${apiKey}`;
+  return `${browserWSEndpoint}?token=${apiKey}&solveCaptchas=true`;
 }
 
 /** The page the user/agent is actually looking at (popups open new tabs), with
@@ -96,12 +119,28 @@ async function activePage(browser: Browser): Promise<Page> {
   const pages = await browser.pages();
   const page = pages[pages.length - 1] || (await browser.newPage());
   await page.setViewport({ ...BROWSER_VIEWPORT, deviceScaleFactor: 1 }).catch(() => undefined);
+  page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
   return page;
 }
 
 async function settle(page: Page, extraMs = 500) {
-  await page.waitForNetworkIdle({ idleTime: 350, timeout: 4000 }).catch(() => undefined);
+  await page.waitForNetworkIdle({ idleTime: 350, timeout: 5000 }).catch(() => undefined);
   await sleep(extraMs);
+}
+
+/** Cheap heuristic so the agent (and its prompt) can tell it hit a bot-check
+ * wall rather than the real page, and know to just wait rather than give up. */
+async function detectCaptcha(page: Page): Promise<boolean> {
+  try {
+    return await page.evaluate(() => {
+      const text = (document.body?.innerText || "").toLowerCase();
+      const hasFrame = !!document.querySelector('iframe[src*="recaptcha"],iframe[src*="hcaptcha"],iframe[title*="challenge"],#turnstile-wrapper,.cf-turnstile');
+      const hasText = /unusual traffic|i'm not a robot|verify you are human|checking your browser|complete the security check/.test(text);
+      return hasFrame || hasText;
+    });
+  } catch {
+    return false;
+  }
 }
 
 /** Numbered list of visible, really-clickable elements, with live centre points. */
@@ -205,7 +244,7 @@ export async function startBrowserSession(
   profileName?: string
 ): Promise<{ sessionId: string; liveUrl: string; profileName?: string }> {
   const profile = profileName ? `&profile=${encodeURIComponent(profileName)}` : "";
-  const browser = await puppeteer.connect({ browserWSEndpoint: `wss://${REGION}/?token=${apiKey}${profile}` });
+  const browser = await puppeteer.connect({ browserWSEndpoint: connectionUrl(apiKey, profile) });
   await activePage(browser);
 
   const reconnectEndpoint = await refreshReconnectEndpoint(browser, apiKey);
@@ -217,7 +256,7 @@ export async function startBrowserSession(
     const page = (await browser.pages())[0] || (await browser.newPage());
     const cdp = await page.createCDPSession();
     const live = (await cdp.send("Browserless.liveURL" as any, {
-      timeout: SESSION_TIMEOUT_MS,
+      timeout: REQUESTED_SESSION_MS,
       interactable: true,
       resizable: true,
       showBrowserInterface: true,
@@ -248,19 +287,19 @@ export async function runBrowserAction(
     switch (action.type) {
       case "goto": {
         const url = /^https?:\/\//i.test(action.url) ? action.url : `https://${action.url}`;
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => undefined);
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
         await settle(page);
         break;
       }
       case "search": {
         await page
-          .goto(searchUrl(action.query, action.engine), { waitUntil: "domcontentloaded", timeout: 30000 })
+          .goto(searchUrl(action.query, action.engine), { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS })
           .catch(() => undefined);
         await settle(page, 800);
         break;
       }
       case "back":
-        await page.goBack({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => undefined);
+        await page.goBack({ waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
         await settle(page);
         break;
       case "click": {
@@ -303,12 +342,14 @@ export async function runBrowserAction(
         extracted = (await page.evaluate(() => document.body?.innerText || "")).replace(/\n{3,}/g, "\n\n").slice(0, 9000);
         break;
       case "wait":
-        await sleep(Math.min(action.ms, 5000));
+        // Captchas can take Browserless's auto-solver 15-30s — allow a longer wait than before.
+        await sleep(Math.min(action.ms, 30000));
         break;
       case "screenshot":
         break;
     }
 
+    const captchaLikely = await detectCaptcha(page);
     const shot = (await page.screenshot({
       encoding: "base64",
       type: "jpeg",
@@ -330,6 +371,7 @@ export async function runBrowserAction(
       title: await page.title().catch(() => ""),
       width: viewport.width,
       height: viewport.height,
+      captchaLikely,
     };
   } finally {
     await browser.disconnect();
