@@ -3,6 +3,8 @@
 import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
 import { extractCodeFiles } from "@/lib/codeExtract";
 import { AGENT_CORE, DEV_CRAFT_GUIDE } from "@/lib/agents";
+import { portForScope, sessionIdForScope } from "@/lib/workspaceScope";
+
 import {
   ensureWorkspace,
   workspaceListFiles,
@@ -13,7 +15,6 @@ import {
   workspaceFreePort,
   workspacePreview,
 } from "@/lib/workspaceRuntime";
-import { portForScope } from "@/lib/workspaceScope";
 
 export type ServerDeveloperResult = {
   changedFiles: string[];
@@ -24,337 +25,116 @@ export type ServerDeveloperResult = {
   steps: string[];
 };
 
-const MAX_CONTEXT_CHARS = 60000;
+type ExistingWorkspaceFile = {
+  path: string;
+  content: string;
+};
 
-/**
- * Prevent the model from writing outside the workspace.
- */
-function safePath(path: string): string | null {
-  const clean = String(path || "")
+const safePath = (p: string) => {
+  const clean = p
     .replace(/\\/g, "/")
-    .replace(/^\/+/, "")
-    .replace(/^\.\/+/, "")
-    .trim();
+    .replace(/^\.?\/+/, "")
+    .replace(/^workspace\//, "");
 
-  if (!clean) return null;
-
-  if (
-    clean.includes("../") ||
-    clean === ".." ||
-    clean.startsWith("../") ||
-    clean.startsWith("~") ||
-    clean.startsWith("/")
-  ) {
+  if (!clean || clean.includes("..") || clean.startsWith("~")) {
     return null;
   }
 
   return clean;
-}
+};
 
-/**
- * Build the developer-agent prompt.
- */
-function buildDeveloperPrompt(
+function buildPrompt(
   task: string,
   history: ChatMessage[],
-  existingFiles: string,
-  installedSkills: string
-): string {
-  const recentHistory = history
-    .slice(-10)
-    .map((message) => {
-      return `${message.role.toUpperCase()}:\n${message.content.slice(
-        0,
-        2500
-      )}`;
-    })
-    .join("\n\n");
+  existing: string,
+  skills: string,
+) {
+  const fence = "```";
+
+  const context = history
+    .slice(-8)
+    .map(
+      (m) =>
+        `${m.role}: ${m.content.slice(0, 1500)}`,
+    )
+    .join("\n");
 
   return `${AGENT_CORE}
 
+You are the Developer Agent working inside a real persistent Linux cloud workspace.
+
+Your job is to actually build, modify, debug and verify the user's project.
+
+Do not only explain code.
+Write the real files into the workspace.
+
 ${DEV_CRAFT_GUIDE}
 
-You are the autonomous Developer Agent operating inside a REAL persistent cloud workspace.
+${skills ? `\n${skills}\n` : ""}
 
-The user's task is:
-
+USER TASK:
 ${task}
 
-YOUR RESPONSIBILITY
+RECENT CONTEXT:
+${context}
 
-You must actually implement the user's request in the existing workspace.
+EXISTING WORKSPACE FILES:
+${existing || "(empty)"}
 
-Do not merely explain how to do it.
+IMPORTANT RULES:
 
-WORKSPACE RULES
-
-1. Inspect the existing project before making changes.
-2. Preserve existing functionality.
-3. Do not rewrite unrelated files.
-4. Do not delete working features unless the user's task explicitly requires it.
-5. Use the existing framework and dependencies whenever possible.
-6. Do not invent unavailable packages or APIs.
-7. Write production-quality code.
-8. Handle loading, error and empty states where appropriate.
-9. Keep TypeScript types correct.
-10. Do not leave TODOs or fake implementations.
-11. Do not return partial files.
-12. Return complete contents for every file you change.
-13. Use only safe relative file paths.
-14. After the files are written, the server runtime will run the project build.
-15. If the build fails, a repair pass will be performed.
-
-FILE OUTPUT FORMAT
-
-Return ONLY files that need to be created or changed.
-
-For each file use:
+1. Return complete files only.
+2. Never return partial files.
+3. Never return snippets.
+4. Preserve existing functionality unless the task requires changing it.
+5. Fix related TypeScript/build errors when they are caused by your changes.
+6. Use safe relative file paths only.
+7. For every file that must be created or changed use exactly:
 
 FILE: path/to/file.ext
-\`\`\`language
-COMPLETE FILE CONTENT
-\`\`\`
+${fence}language
+full file contents
+${fence}
 
-Example:
-
-FILE: app/page.tsx
-\`\`\`tsx
-export default function Page() {
-  return <main>Hello</main>;
-}
-\`\`\`
-
-IMPORTANT
-
-- Never return a partial file.
-- Never use "...".
-- Never use placeholder code.
-- Never use unsafe paths.
-- Never put explanations outside the file blocks.
-
-${
-  installedSkills
-    ? `AVAILABLE SKILLS:\n${installedSkills}\n`
-    : ""
+Do not return explanations outside the files.`;
 }
 
-RECENT CONVERSATION:
-
-${recentHistory || "(no recent conversation)"}
-
-CURRENT WORKSPACE:
-
-${existingFiles || "(workspace is empty)"}
-`;
-}
-
-/**
- * Convert workspace files into compact model context.
- */
-function serializeWorkspaceFiles(
-  files: Array<{ path: string; content?: string }>
-): string {
-  let used = 0;
-  const chunks: string[] = [];
-
-  for (const file of files) {
-    const content = String(file.content || "");
-
-    if (!content) {
-      chunks.push(`FILE: ${file.path}\n(empty)`);
-      continue;
-    }
-
-    if (used >= MAX_CONTEXT_CHARS) {
-      chunks.push(`FILE: ${file.path}\n(content omitted due to context limit)`);
-      continue;
-    }
-
-    const remaining = MAX_CONTEXT_CHARS - used;
-    const clipped = content.slice(0, Math.min(remaining, 12000));
-
-    chunks.push(
-      `FILE: ${file.path}\n\`\`\`\n${clipped}\n\`\`\``
-    );
-
-    used += clipped.length;
-  }
-
-  return chunks.join("\n\n");
-}
-
-/**
- * Wait until a development server becomes visible on the expected port.
- */
 async function waitForPort(
   uid: string,
-  expectedPort: number,
-  attempts = 25
-): Promise<number | null> {
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    try {
-      const result = await workspaceListeningPorts(uid);
+  preferred: number,
+  before: number[],
+  tries = 20,
+) {
+  const baseline = new Set(before);
 
-      if (result.ports.includes(expectedPort)) {
-        return expectedPort;
-      }
-    } catch {
-      // The sandbox may still be starting the process.
+  for (let i = 0; i < tries; i++) {
+    const ports = await workspaceListeningPorts(uid).catch(() => ({
+      ports: [] as number[],
+    }));
+
+    if (ports.ports.includes(preferred)) {
+      return preferred;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const fresh = ports.ports.find(
+      (p) =>
+        !baseline.has(p) &&
+        p >= 3000 &&
+        p <= 9999,
+    );
+
+    if (fresh) {
+      return fresh;
+    }
+
+    await new Promise((resolve) =>
+      setTimeout(resolve, 1000),
+    );
   }
 
   return null;
 }
 
-/**
- * Run npm build.
- *
- * IMPORTANT:
- * workspaceExec returns `output`, not stdout/stderr.
- */
-async function runProductionBuild(
-  uid: string,
-  scope: string,
-  onStep?: (message: string) => Promise<void> | void
-) {
-  await onStep?.("🔨 Running production build...");
-
-  const result = await workspaceExec(
-    uid,
-    "npm run build",
-    scope,
-    300
-  );
-
-  return {
-    ok: result.exitCode === 0,
-    output: String(result.output || ""),
-  };
-}
-
-/**
- * Start the user's development server on the stable port assigned
- * to this workspace scope.
- */
-async function startDevelopmentServer(
-  uid: string,
-  scope: string,
-  onStep?: (message: string) => Promise<void> | void
-) {
-  await onStep?.("🚀 Starting the development server...");
-
-  /*
-   * Each workspace scope receives a stable port.
-   *
-   * This prevents two chats from fighting over port 3000.
-   */
-  const port = portForScope(scope, false);
-
-  /*
-   * Free only this exact port.
-   *
-   * We never run broad pkill commands because the same Daytona
-   * sandbox can contain multiple workspace scopes.
-   */
-  await workspaceFreePort(uid, port);
-
-  const sessionId = `developer-preview-${scope || "global"}`;
-
-  /*
-   * Next.js accepts:
-   *
-   * npm run dev -- --hostname 0.0.0.0 --port PORT
-   *
-   * The command is intentionally run asynchronously so the HTTP
-   * request does not wait forever for the dev server.
-   */
-  const command =
-    `npm run dev -- --hostname 0.0.0.0 --port ${port}`;
-
-  try {
-    await workspaceSessionExec(
-      uid,
-      sessionId,
-      command,
-      scope,
-      true
-    );
-  } catch (error) {
-    /*
-     * If a dev server is already running in this scope, we still
-     * continue and check the port.
-     */
-    const message =
-      error instanceof Error
-        ? error.message
-        : String(error);
-
-    await onStep?.(
-      `ℹ️ Development server start returned: ${message}`
-    );
-  }
-
-  const detectedPort = await waitForPort(
-    uid,
-    port,
-    30
-  );
-
-  if (!detectedPort) {
-    await onStep?.(
-      "⚠️ Development server did not become available."
-    );
-
-    return {
-      port: undefined,
-      previewUrl: undefined,
-    };
-  }
-
-  await onStep?.(
-    `🌐 Development server is running on port ${detectedPort}.`
-  );
-
-  /*
-   * workspacePreview returns:
-   *
-   * {
-   *   sandboxId,
-   *   port,
-   *   url
-   * }
-   */
-  try {
-    const preview = await workspacePreview(
-      uid,
-      detectedPort
-    );
-
-    return {
-      port: detectedPort,
-      previewUrl: preview.url,
-    };
-  } catch (error) {
-    await onStep?.(
-      `⚠️ Preview URL could not be generated: ${
-        error instanceof Error
-          ? error.message
-          : String(error)
-      }`
-    );
-
-    return {
-      port: detectedPort,
-      previewUrl: undefined,
-    };
-  }
-}
-
-/**
- * Main autonomous developer runtime.
- */
 export async function runServerDeveloperWorkspace(
   uid: string,
   providerId: string,
@@ -364,7 +144,7 @@ export async function runServerDeveloperWorkspace(
   history: ChatMessage[],
   scope: string,
   installedSkills = "",
-  onStep?: (message: string) => Promise<void> | void
+  onStep?: (step: string) => Promise<void> | void,
 ): Promise<ServerDeveloperResult> {
   const steps: string[] = [];
 
@@ -373,338 +153,445 @@ export async function runServerDeveloperWorkspace(
     await onStep?.(message);
   };
 
-  /*
-   * ------------------------------------------------------------
-   * 1. Prepare persistent Daytona workspace
-   * ------------------------------------------------------------
-   */
-
-  await step(
-    "💻 Preparing the persistent Daytona development workspace..."
-  );
+  // ---------------------------------------------------------
+  // 1. ENSURE PERSISTENT WORKSPACE
+  // ---------------------------------------------------------
 
   const workspace = await ensureWorkspace(uid);
 
   await step(
-    `☁️ Connected to persistent workspace ${workspace.sandboxId.slice(
+    `Persistent workspace ready: ${workspace.sandboxId.slice(
       0,
-      12
-    )}...`
+      10,
+    )}…`,
   );
 
-  /*
-   * ------------------------------------------------------------
-   * 2. Inspect project
-   * ------------------------------------------------------------
-   */
+  // ---------------------------------------------------------
+  // 2. READ EXISTING PROJECT
+  // ---------------------------------------------------------
 
-  await step(
-    "🔎 Inspecting the existing project..."
-  );
-
-  /*
-   * IMPORTANT:
-   * workspaceListFiles returns { files }, not a direct array.
-   */
   const listing = await workspaceListFiles(
     uid,
     true,
-    scope
-  );
+    scope,
+  ).catch(() => ({
+    files: [] as ExistingWorkspaceFile[],
+  }));
 
-  const existingFiles = Array.isArray(listing.files)
-    ? listing.files
-    : [];
+  const existingFiles: ExistingWorkspaceFile[] =
+    Array.isArray(listing.files)
+      ? listing.files
+      : [];
 
-  const existingContext =
-    serializeWorkspaceFiles(existingFiles);
+  let budget = 60000;
 
-  /*
-   * ------------------------------------------------------------
-   * 3. Ask the connected model to implement the task
-   * ------------------------------------------------------------
-   */
+  const existing = existingFiles
+    .slice(0, 40)
+    .map((file) => {
+      const body = (file.content || "").slice(
+        0,
+        8000,
+      );
 
-  await step(
-    "🧠 Planning the implementation..."
-  );
+      budget -= body.length;
 
-  const prompt = buildDeveloperPrompt(
-    task,
-    history,
-    existingContext,
-    installedSkills
-  );
+      return budget > 0
+        ? `FILE: ${file.path}\n\`\`\`\n${body}\n\`\`\``
+        : `FILE: ${file.path} (omitted)`;
+    })
+    .join("\n\n");
 
-  await step(
-    "✍️ Generating the implementation..."
-  );
+  // ---------------------------------------------------------
+  // 3. GENERATE IMPLEMENTATION
+  // ---------------------------------------------------------
 
-  const response = await sendChatMessage({
+  await step("Analyzing the project and generating implementation…");
+
+  let response = await sendChatMessage({
     providerId,
     apiKey,
     model,
     messages: [
       {
         role: "user",
-        content: prompt,
+        content: buildPrompt(
+          task,
+          history,
+          existing,
+          installedSkills,
+        ),
       },
     ],
   });
 
-  const generatedFiles = extractCodeFiles([
+  let files = extractCodeFiles([
     {
       role: "assistant",
       content: response.text || "",
     },
-  ]);
+  ]).filter(
+    (file) => !/^snippet-/.test(file.filename),
+  );
 
-  if (!generatedFiles.length) {
+  if (!files.length) {
     throw new Error(
-      "Developer Agent returned no editable files."
+      "Developer Agent returned no editable files.",
     );
   }
 
-  /*
-   * ------------------------------------------------------------
-   * 4. Write files
-   * ------------------------------------------------------------
-   */
+  // ---------------------------------------------------------
+  // 4. WRITE REAL FILES
+  // ---------------------------------------------------------
 
   const changedFiles: string[] = [];
 
-  for (const file of generatedFiles) {
+  for (const file of files) {
     const path = safePath(file.filename);
 
     if (!path) {
-      await step(
-        `⚠️ Skipped unsafe file path: ${file.filename}`
-      );
       continue;
     }
 
-    /*
-     * Prevent accidental overwriting of environment secrets.
-     */
-    if (
-      path === ".env" ||
-      path.startsWith(".env.") &&
-      path !== ".env.example"
-    ) {
-      await step(
-        `🔐 Skipped protected environment file: ${path}`
-      );
-      continue;
-    }
-
-    await step(
-      `📝 Writing ${path}...`
-    );
-
+    // IMPORTANT:
+    // CodeFile uses `code`, NOT `content`.
     await workspaceWriteFile(
       uid,
       path,
-      file.content,
-      scope
+      file.code,
+      scope,
     );
 
     changedFiles.push(path);
+
+    await step(`Wrote ${path}`);
   }
 
-  if (!changedFiles.length) {
-    throw new Error(
-      "Developer Agent returned no safe files to write."
+  // ---------------------------------------------------------
+  // 5. PROJECT DETECTION
+  // ---------------------------------------------------------
+
+  const has = (name: string) =>
+    changedFiles.includes(name) ||
+    existingFiles.some(
+      (file) => file.path === name,
     );
+
+  const packageFile = files.find(
+    (file) =>
+      safePath(file.filename) ===
+      "package.json",
+  );
+
+  const existingPackage = existingFiles.find(
+    (file) =>
+      file.path === "package.json",
+  );
+
+  const packageText =
+    packageFile?.code ||
+    existingPackage?.content ||
+    "";
+
+  const hasPackage =
+    has("package.json") &&
+    !!packageText;
+
+  const hasHtml =
+    changedFiles.some((path) =>
+      path.endsWith(".html"),
+    ) ||
+    existingFiles.some((file) =>
+      file.path.endsWith(".html"),
+    );
+
+  // ---------------------------------------------------------
+  // 6. INSTALL DEPENDENCIES
+  // ---------------------------------------------------------
+
+  let buildOutput = "";
+  let buildOk = true;
+
+  if (hasPackage) {
+    const needInstall =
+      changedFiles.includes(
+        "package.json",
+      ) ||
+      !(await workspaceExec(
+        uid,
+        "test -d node_modules && echo yes || echo no",
+        scope,
+        20,
+      )
+        .then((result) =>
+          result.output.includes("yes"),
+        )
+        .catch(() => false));
+
+    if (needInstall) {
+      await step(
+        "Installing project dependencies…",
+      );
+
+      const install = await workspaceExec(
+        uid,
+        "npm install --no-audit --no-fund",
+        scope,
+        300,
+      );
+
+      buildOutput = install.output;
+
+      if (install.exitCode !== 0) {
+        buildOk = false;
+      }
+    }
   }
 
-  await step(
-    `✅ Updated ${changedFiles.length} file${
-      changedFiles.length === 1 ? "" : "s"
-    }.`
-  );
+  // ---------------------------------------------------------
+  // 7. PRODUCTION BUILD
+  // ---------------------------------------------------------
 
-  /*
-   * ------------------------------------------------------------
-   * 5. Build
-   * ------------------------------------------------------------
-   */
-
-  let build = await runProductionBuild(
-    uid,
-    scope,
-    step
-  );
-
-  /*
-   * ------------------------------------------------------------
-   * 6. Automatic repair
-   * ------------------------------------------------------------
-   */
-
-  let repairAttempts = 0;
-
-  while (!build.ok && repairAttempts < 2) {
-    repairAttempts++;
-
+  if (
+    buildOk &&
+    hasPackage &&
+    /"build"\s*:/.test(packageText)
+  ) {
     await step(
-      `❌ Build failed. Starting automatic repair ${repairAttempts}/2...`
+      "Running production build…",
     );
 
-    const repairPrompt = `${AGENT_CORE}
+    let build = await workspaceExec(
+      uid,
+      "npm run build",
+      scope,
+      300,
+    );
 
-You are the repair engineer for a REAL project inside a persistent cloud workspace.
+    buildOutput = build.output;
 
-ORIGINAL USER TASK:
+    // -------------------------------------------------------
+    // 8. SELF-REPAIR LOOP
+    // -------------------------------------------------------
 
-${task}
+    for (
+      let attempt = 1;
+      attempt <= 2 &&
+      build.exitCode !== 0;
+      attempt++
+    ) {
+      await step(
+        `Build failed — automatic repair attempt ${attempt}/2…`,
+      );
 
-FILES CURRENTLY CHANGED:
+      response = await sendChatMessage({
+        providerId,
+        apiKey,
+        model,
+        messages: [
+          {
+            role: "user",
+            content: `Fix this real project.
 
-${changedFiles.join("\n")}
-
-PRODUCTION BUILD ERROR:
-
-${build.output.slice(-16000)}
-
-YOUR JOB:
-
-Fix the actual build/type/runtime error.
-
-Do not rewrite unrelated functionality.
-
-Do not invent packages.
-
-Return ONLY COMPLETE FILES that need changing.
-
-Format:
+Return ONLY complete changed files using:
 
 FILE: path/to/file.ext
 \`\`\`language
-COMPLETE FILE CONTENT
+complete file
 \`\`\`
 
-Never return partial files.
-Never use unsafe paths.
-Never explain the fix outside the file blocks.
-`;
+Do not return explanations.
 
-    const repairResponse = await sendChatMessage({
-      providerId,
-      apiKey,
-      model,
-      messages: [
+ORIGINAL TASK:
+${task}
+
+BUILD ERROR:
+${build.output.slice(-14000)}
+
+EXISTING CHANGED FILES:
+${changedFiles.join("\n")}`,
+          },
+        ],
+      });
+
+      const repaired = extractCodeFiles([
         {
-          role: "user",
-          content: repairPrompt,
+          role: "assistant",
+          content: response.text || "",
         },
-      ],
-    });
-
-    const repairFiles = extractCodeFiles([
-      {
-        role: "assistant",
-        content: repairResponse.text || "",
-      },
-    ]);
-
-    if (!repairFiles.length) {
-      await step(
-        "⚠️ Repair model returned no files."
-      );
-      break;
-    }
-
-    for (const file of repairFiles) {
-      const path = safePath(file.filename);
-
-      if (!path) {
-        continue;
-      }
-
-      if (
-        path === ".env" ||
-        (path.startsWith(".env.") &&
-          path !== ".env.example")
-      ) {
-        continue;
-      }
-
-      await step(
-        `🔧 Repairing ${path}...`
+      ]).filter(
+        (file) => !/^snippet-/.test(file.filename),
       );
 
-      await workspaceWriteFile(
+      if (!repaired.length) {
+        await step(
+          "Repair agent returned no valid files.",
+        );
+        break;
+      }
+
+      for (const file of repaired) {
+        const path = safePath(file.filename);
+
+        if (!path) {
+          continue;
+        }
+
+        // IMPORTANT:
+        // CodeFile field is `code`.
+        await workspaceWriteFile(
+          uid,
+          path,
+          file.code,
+          scope,
+        );
+
+        if (!changedFiles.includes(path)) {
+          changedFiles.push(path);
+        }
+
+        await step(`Patched ${path}`);
+      }
+
+      build = await workspaceExec(
         uid,
-        path,
-        file.content,
-        scope
+        "npm run build",
+        scope,
+        300,
       );
 
-      if (!changedFiles.includes(path)) {
-        changedFiles.push(path);
-      }
+      buildOutput = build.output;
     }
 
-    build = await runProductionBuild(
-      uid,
+    buildOk = build.exitCode === 0;
+
+    if (buildOk) {
+      await step(
+        "Production build passed successfully.",
+      );
+    }
+  }
+
+  // ---------------------------------------------------------
+  // 9. LIVE PREVIEW
+  // ---------------------------------------------------------
+
+  let previewUrl: string | undefined;
+  let previewPort: number | undefined;
+
+  if (
+    buildOk &&
+    (hasPackage || hasHtml)
+  ) {
+    const isVite =
+      /vite/i.test(packageText);
+
+    const isNext =
+      /"next"/i.test(packageText);
+
+    const port = portForScope(
       scope,
-      step
+      isVite,
     );
-  }
 
-  /*
-   * ------------------------------------------------------------
-   * 7. Stop if build is still broken
-   * ------------------------------------------------------------
-   */
+    const before =
+      (
+        await workspaceListeningPorts(
+          uid,
+        ).catch(() => ({
+          ports: [] as number[],
+        }))
+      ).ports;
 
-  if (!build.ok) {
+    await workspaceFreePort(
+      uid,
+      port,
+    ).catch(() => undefined);
+
+    const hasDev =
+      /"dev"\s*:/.test(packageText);
+
+    const hasStart =
+      /"start"\s*:/.test(packageText);
+
+    let command = "";
+
+    if (
+      hasPackage &&
+      (hasDev || hasStart)
+    ) {
+      const script = hasDev
+        ? "dev"
+        : "start";
+
+      let flags = "";
+
+      if (isVite) {
+        flags =
+          ` -- --host 0.0.0.0 --port ${port}`;
+      } else if (isNext) {
+        flags =
+          ` -- -H 0.0.0.0 -p ${port}`;
+      }
+
+      command =
+        `HOST=0.0.0.0 PORT=${port} npm run ${script}${flags}`;
+    } else {
+      command =
+        `python3 -m http.server ${port} --bind 0.0.0.0`;
+    }
+
     await step(
-      "❌ Production build is still failing after automatic repair."
+      `Starting live preview on port ${port}…`,
     );
 
-    return {
-      changedFiles,
-      buildOutput: build.output,
-      buildOk: false,
-      steps,
-    };
-  }
-
-  await step(
-    "✅ Production build passed successfully."
-  );
-
-  /*
-   * ------------------------------------------------------------
-   * 8. Start live preview
-   * ------------------------------------------------------------
-   */
-
-  const preview = await startDevelopmentServer(
-    uid,
-    scope,
-    step
-  );
-
-  if (preview.previewUrl) {
-    await step(
-      "🟢 Live preview is ready."
+    await workspaceSessionExec(
+      uid,
+      sessionIdForScope(
+        scope,
+        "agenticvenus-dev",
+      ),
+      command,
+      scope,
+      true,
     );
+
+    const livePort =
+      await waitForPort(
+        uid,
+        port,
+        before,
+      );
+
+    if (livePort) {
+      const preview =
+        await workspacePreview(
+          uid,
+          livePort,
+        );
+
+      previewUrl = preview.url;
+      previewPort = livePort;
+
+      await step(
+        `Live preview ready: ${preview.url}`,
+      );
+    } else {
+      await step(
+        "Development server started, but the live preview port could not be detected.",
+      );
+    }
   }
 
-  /*
-   * ------------------------------------------------------------
-   * 9. Final result
-   * ------------------------------------------------------------
-   */
+  // ---------------------------------------------------------
+  // 10. FINAL RESULT
+  // ---------------------------------------------------------
 
   return {
     changedFiles,
-    buildOutput: build.output,
-    buildOk: true,
-    previewUrl: preview.previewUrl,
-    previewPort: preview.port,
+    buildOutput,
+    buildOk,
+    previewUrl,
+    previewPort,
     steps,
   };
 }
