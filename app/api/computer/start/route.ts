@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json().catch(() => ({}));
-    const result = await startComputer(apiKey, { uid: decoded.uid, scope: body?.scope, gpu: !!body?.gpu });
+    const result = await startComputer(apiKey, { uid: decoded.uid, scope: typeof body?.scope === "string" ? body.scope : "primary", gpu: !!body?.gpu });
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     console.error("[api/computer/start]", err);
