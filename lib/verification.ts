@@ -18,8 +18,8 @@ export async function verifyTaskResult(
     const { text } = await sendChatMessage({ providerId, apiKey, model, messages: [{ role: "user", content: prompt }] });
     const parsed = JSON.parse(extractJson(text));
     return { verified: !!parsed.verified, reason: parsed.reason || "" };
-  } catch {
-    return { verified: true, reason: "Could not run verification — assuming success." };
+  } catch (err) {
+    return { verified: false, reason: `Verification could not be completed: ${err instanceof Error ? err.message : "unknown error"}.` };
   }
 }
 
