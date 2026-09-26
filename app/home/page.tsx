@@ -11,6 +11,10 @@ import { ChatMessageItem, TypingIndicator } from "@/components/ChatMessage";
 import SchedulerPanel from "@/components/SchedulerPanel";
 import ConnectorsPanel from "@/components/ConnectorsPanel";
 import MissionFlowPanel from "@/components/MissionFlowPanel";
+import { looksLikeMissionTask } from "@/lib/mission/classifier";
+import { planMission } from "@/lib/mission/planner";
+import { createMission } from "@/lib/mission/store";
+import { runMission, type ExecutorDeps as MissionExecutorDeps } from "@/lib/missionRunner";
 import { decideTerminalCommand, runPlannedCommand } from "@/lib/terminalOrchestrator";
 import { decideComputerStart } from "@/lib/computerClient";
 import BusinessDNAPanel from "@/components/BusinessDNAPanel";
@@ -28,12 +32,14 @@ import ToolConnectPrompt from "@/components/ToolConnectPrompt";
 import ComputerViewPanel from "@/components/ComputerViewPanel";
 import BrowserViewPanel from "@/components/BrowserViewPanel";
 import AgentStatusLine from "@/components/AgentStatusLine";
+import PlanApprovalCard from "@/components/PlanApprovalCard";
 import WorkingCard from "@/components/WorkingCard";
 import CapabilityConnectPrompt from "@/components/CapabilityConnectPrompt";
 import { looksLikeDeveloperTask, runDeveloperWorkspace } from "@/lib/developerRuntime";
 import { startComputerSession, stopComputerSession, runComputerTask, getComputerLiveUrl } from "@/lib/computerClient";
 import { startBrowserSession, stopBrowserSession, runBrowserTask, listBrowserProfiles } from "@/lib/browserClient";
 import { decideAutoTools, type AutoToolDecision } from "@/lib/autoTools";
+import { generateTaskPlan } from "@/lib/taskPlanner";
 import { importSkillFromUrl } from "@/lib/skillImportClient";
 import { saveCustomSkill } from "@/lib/customSkills";
 import { listAgentGroups, type AgentGroup } from "@/lib/agentGroups";
@@ -78,6 +84,7 @@ import { listMCPServers, type MCPServer } from "@/lib/mcp";
 import { decideMcpToolCall, callMcpTool } from "@/lib/mcpOrchestrator";
 import { decidePluginAction, callPluginAction } from "@/lib/pluginOrchestrator";
 import { extractCodeFiles } from "@/lib/codeExtract";
+import { startAgentJob } from "@/lib/agentRuntimeClient";
 import {
   listChats,
   createChat,
@@ -88,6 +95,14 @@ import {
   type ChatSummary,
   type ChatRecord,
 } from "@/lib/chats";
+
+type PendingPlan = {
+  task: string;
+  attachments: Attachment[];
+  autoDecision: AutoToolDecision;
+  steps: string[];
+  chatId: string;
+};
 
 export default function HomePage() {
   const { user, loading } = useAuth();
@@ -129,6 +144,8 @@ export default function HomePage() {
   const [activeAgent, setActiveAgent] = useState<Agent | null>(null);
   const [classifying, setClassifying] = useState(false);
   const [agentStatus, setAgentStatus] = useState<string | null>(null);
+  const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
+  const [planBusy, setPlanBusy] = useState(false);
 
   const [groups, setGroups] = useState<AgentGroup[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
@@ -365,7 +382,7 @@ export default function HomePage() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages, sending]);
+  }, [messages, sending, pendingPlan]);
 
   useEffect(() => {
     if (!user || !chatId || !telegram?.botUsername) return;
@@ -431,6 +448,7 @@ export default function HomePage() {
     setTelegram(null);
     setCeoMode(false);
     setToolNeed(null);
+    setPendingPlan(null);
     setActiveGroupId(null);
     setActiveChatGroup(null);
     setActiveProviderId(connected?.id ?? null);
@@ -449,6 +467,7 @@ export default function HomePage() {
     setCeoMode(!!chat.ceoMode);
     setActiveGroupId(chat.groupId ?? null);
     setToolNeed(null);
+    setPendingPlan(null);
     setGreeting(null);
     setError(null);
   }
@@ -486,7 +505,7 @@ export default function HomePage() {
   async function handleStartComputer() {
     setComputerStarting(true);
     try {
-      const { sandboxId } = await startComputerSession(undefined);
+      const { sandboxId } = await startComputerSession(chatId || undefined);
       setComputerSandboxId(sandboxId);
       const liveUrl = await getComputerLiveUrl(sandboxId);
       setComputerStreamUrl(liveUrl);
@@ -702,6 +721,7 @@ export default function HomePage() {
     setError(null);
     setGreeting(null);
     setToolNeed(null);
+    setPendingPlan(null);
 
     let currentChatId = chatId;
     if (!currentChatId) {
@@ -726,9 +746,86 @@ export default function HomePage() {
       return;
     }
 
-    // Multi-part work stays in the same autonomous executor. The old Mission
-    // runtime ran from the browser tab and introduced a second orchestration
-    // path; keeping one execution path prevents tool/state drift.
+    // Durable server-side Agent Runtime: the browser is now only the UI.
+    // The job is persisted before execution, so a closed tab can no longer
+    // cancel the agent's state. The old specialist/mission code below remains
+    // as a compatibility fallback, but normal tasks use this runtime first.
+    await persist(nextMessages, currentChatId, activeAgent?.id, provider.id);
+    setSending(true);
+    setWorkingLabel("Agent is working autonomously…");
+    setAgentStatus("🧠 Understanding → planning → executing → verifying");
+    try {
+      const job = await startAgentJob(currentChatId, task, (liveJob:any) => {
+        if (liveJob?.phase) setAgentStatus(`🤖 ${String(liveJob.phase).replace(/_/g, " ")}`);
+        if (liveJob?.steps?.length) setWorkingLabel(liveJob.steps[liveJob.steps.length - 1]);
+        if (liveJob?.computerLiveUrl) { setComputerStreamUrl(liveJob.computerLiveUrl); setComputerViewOpen(true); }
+        if (liveJob?.browserLiveUrl) { setBrowserLiveUrl(liveJob.browserLiveUrl); setBrowserViewOpen(true); }
+      });
+      if (job?.computerLiveUrl) { setComputerStreamUrl(job.computerLiveUrl); setComputerViewOpen(true); }
+      if (job?.browserLiveUrl) { setBrowserLiveUrl(job.browserLiveUrl); setBrowserViewOpen(true); }
+      if (job?.status === "needs_input") {
+        const msg: ChatMessage = { role: "assistant", content: `I need one setup step before I can do this: ${job.error || "a required capability is not connected."}` };
+        setMessages([...nextMessages, msg]);
+      } else if (job?.status === "completed") {
+        const result = String(job.resultText || "Task completed.");
+        setMessages([...nextMessages, { role: "assistant", content: result }]);
+      } else if (job?.status === "failed") {
+        setMessages([...nextMessages, { role: "assistant", content: `I couldn't complete that task. **Error:** ${job.error || "unknown error"}` }]);
+      }
+      const refreshed = await getChat(user.uid, currentChatId);
+      if (refreshed) setMessages(refreshed.messages);
+      await incrementTodayUsage(user.uid);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The Agent Runtime failed.");
+    } finally {
+      setSending(false);
+      setWorkingLabel(null);
+      setAgentStatus(null);
+    }
+    return;
+
+    // A big, multi-part request ("build a site AND find leads AND email
+    // them...") gets a small team instead of one specialist. Cheap regex
+    // check first; only asks the model to actually plan it out when that
+    // heuristic says it's plausible.
+    if (looksLikeMissionTask(task)) {
+      const [missionToolIds, missionIntKeys] = await Promise.all([
+        listConnectedPluginIds(user.uid),
+        getIntegrationKeys(user.uid),
+      ]);
+      const tasks = await planMission(provider.id, activeKey, task, model);
+      const rolesUsed = new Set(tasks.map((t) => t.role));
+      const looksLikeRealTeamwork = tasks.length >= 3 && (rolesUsed.size >= 3 || tasks.filter((t) => t.dependsOn.length === 0).length >= 2);
+
+      if (looksLikeRealTeamwork) {
+        const missionId = await createMission(user.uid, task, tasks, currentChatId);
+        const kickoff: ChatMessage = {
+          role: "assistant",
+          content: `This needs a small team — splitting it into ${tasks.length} parts:\n${tasks
+            .map((t) => `- **${t.role}**: ${t.title}`)
+            .join("\n")}\n\nOpen **Agent Team** (next to Settings) to watch it live — I'll post the summary here when it's done.`,
+        };
+        const finalMessages = [...nextMessages, kickoff];
+        setMessages(finalMessages);
+        await persist(finalMessages, currentChatId, activeAgent?.id, provider.id);
+
+        const missionDeps: MissionExecutorDeps = {
+          uid: user.uid,
+          providerId: provider.id,
+          apiKey: activeKey,
+          model,
+          hasBrowser: !!missionIntKeys.browserlessApiKey,
+          hasDaytona: !!missionIntKeys.daytonaApiKey,
+          gmailConnected: missionToolIds.includes("gmail"),
+          calendarConnected: missionToolIds.includes("google-calendar"),
+        };
+        runMission(missionDeps, missionId);
+        setMissionFlowOpen(true);
+        return;
+      }
+      // Not actually a multi-agent job (e.g. planner returned 1-2 simple
+      // steps) — fall through and handle it as a normal message below.
+    }
 
     // Refresh immediately before routing. A connection made seconds ago must be
     // visible to the agent even if the 8-second background sync has not fired yet.
@@ -793,9 +890,21 @@ export default function HomePage() {
       return;
     }
 
-    // Do not block real work behind a Mission/Plan approval card. The agent
-    // can plan internally and start execution immediately; the activity UI
-    // remains available while it works.
+    const needsRealWork = autoDecision.needsBrowser || autoDecision.needsComputer || /\b(build|create|make|develop|code|website|app|game|deploy|edit|fix|debug|send|reply|post|book|schedule)\b/i.test(task);
+    if (needsRealWork) {
+      const toolsSummary = [
+        autoDecision.needsBrowser ? "a real web browser" : null,
+        autoDecision.needsComputer ? "a persistent cloud computer + terminal" : null,
+        !autoDecision.needsBrowser && !autoDecision.needsComputer ? "the agent workspace, files, terminal and connected tools" : null,
+      ].filter(Boolean).join(" and ");
+      const plan = await generateTaskPlan(provider.id, activeKey, task, toolsSummary, model);
+      await persist(nextMessages, currentChatId, selectedAgent.id, provider.id);
+      if (plan?.steps?.length) {
+        setPendingPlan({ task, attachments, autoDecision, steps: plan.steps, chatId: currentChatId });
+        return;
+      }
+    }
+
     await executeTask(task, attachments, currentChatId, autoDecision);
   }
 
@@ -969,7 +1078,7 @@ export default function HomePage() {
         if (!sbx) {
           const { gpu, reason } = decideComputerStart(task);
           if (gpu) setAgentStatus(`🖥️ ${reason} Requesting a GPU sandbox…`);
-          const started = await startComputerSession(undefined, gpu);
+          const started = await startComputerSession("primary", gpu);
           sbx = started.sandboxId;
           setComputerSandboxId(sbx);
           const liveUrl = await getComputerLiveUrl(sbx);
@@ -1018,7 +1127,7 @@ export default function HomePage() {
       agentConnections.some((c) => c.sourceChatId === currentChatId)
         ? "You have other agents connected that you can consult when the user explicitly wants their input."
         : null,
-      "For multi-step objectives, work through the normal agent loop: understand → execute with real tools → verify → recover/retry. Never claim completion without evidence.",
+      "For multi-step objectives, work through the normal agent loop: plan → approval → execute with real tools → verify. Never claim completion without evidence.",
     ]
       .filter(Boolean)
       .join("\n");
@@ -1094,6 +1203,25 @@ export default function HomePage() {
     }
   }
 
+  async function handleApprovePlan() {
+    if (!pendingPlan) return;
+    setPlanBusy(true);
+    setWorkingLabel("Starting the approved work…");
+    const { task, attachments, autoDecision, chatId: targetChatId } = pendingPlan;
+    setPendingPlan(null);
+    await executeTask(task, attachments, targetChatId, autoDecision);
+    setPlanBusy(false);
+  }
+
+  async function handleCancelPlan() {
+    if (!pendingPlan || !user) return;
+    const { chatId: targetChatId } = pendingPlan;
+    const cancelMsg: ChatMessage = { role: "assistant", content: "Okay, I won't go ahead with that." };
+    const finalMessages = [...messages, cancelMsg];
+    setMessages(finalMessages);
+    await persist(finalMessages, targetChatId, activeAgent?.id, activeConnection?.provider.id);
+    setPendingPlan(null);
+  }
 
   const codeFiles = extractCodeFiles(messages);
   const chatAssets = messages.flatMap((m) => m.attachments || []);
@@ -1331,7 +1459,14 @@ export default function HomePage() {
 
               {workingLabel && <WorkingCard label={workingLabel} agentName={activeAgent?.name} onStop={() => setWorkingLabel(null)} />}
 
-
+              {pendingPlan && ( 
+                <PlanApprovalCard
+                  steps={pendingPlan.steps}
+                  onApprove={handleApprovePlan}
+                  onCancel={handleCancelPlan}
+                  busy={planBusy}
+                />
+              )}
 
               {toolNeed && (
                 <ToolConnectPrompt
