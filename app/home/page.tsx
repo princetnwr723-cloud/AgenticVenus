@@ -9,8 +9,14 @@ import ModelSelectorModal from "@/components/ModelSelectorModal";
 import Sidebar from "@/components/Sidebar";
 import { ChatMessageItem, TypingIndicator } from "@/components/ChatMessage";
 import SchedulerPanel from "@/components/SchedulerPanel";
-import PluginsPanel from "@/components/PluginsPanel";
-import MCPPanel from "@/components/MCPPanel";
+import ConnectorsPanel from "@/components/ConnectorsPanel";
+import MissionFlowPanel from "@/components/MissionFlowPanel";
+import { looksLikeMissionTask } from "@/lib/mission/classifier";
+import { planMission } from "@/lib/mission/planner";
+import { createMission } from "@/lib/mission/store";
+import { runMission, type ExecutorDeps as MissionExecutorDeps } from "@/lib/missionRunner";
+import { decideTerminalCommand, runPlannedCommand } from "@/lib/terminalOrchestrator";
+import { decideComputerStart } from "@/lib/computerClient";
 import BusinessDNAPanel from "@/components/BusinessDNAPanel";
 import AgentTeamPanel from "@/components/AgentTeamPanel";
 import GroupsPanel from "@/components/GroupsPanel";
@@ -55,7 +61,6 @@ import { sendChatMessage, type ChatMessage, type Attachment } from "@/lib/chatCl
 import type { Provider } from "@/lib/providers";
 import { classifyAgent, getAgentById, type Agent } from "@/lib/agents";
 import { getAgentMemory, buildLessonsContext, reflectAndLearn } from "@/lib/agentMemory";
-import MissionPanel from "@/components/MissionPanel";
 import SkillsPanel from "@/components/SkillsPanel";
 import PricingPanel from "@/components/PricingPanel";
 import { listInstalledSkillIds, buildInstalledSkillsContext } from "@/lib/skillConnections";
@@ -123,6 +128,9 @@ export default function HomePage() {
   const [highlightToolId, setHighlightToolId] = useState<string | null>(null);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [mcpPrefill, setMcpPrefill] = useState<{ name: string; url: string } | null>(null);
+  const [connectorsOpen, setConnectorsOpen] = useState(false);
+  const [connectorsTab, setConnectorsTab] = useState<"plugins" | "mcp">("plugins");
+  const [missionFlowOpen, setMissionFlowOpen] = useState(false);
   const [businessOpen, setBusinessOpen] = useState(false);
   const [codespaceOpen, setCodespaceOpen] = useState(false);
   const [cloudWorkspaceOpen, setCloudWorkspaceOpen] = useState(false);
@@ -173,7 +181,6 @@ export default function HomePage() {
   const [customSkills, setCustomSkills] = useState<Skill[]>([]);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [pricingOpen, setPricingOpen] = useState(false);
-  const [missionsOpen, setMissionsOpen] = useState(false);
   const [planId, setPlanId] = useState<PlanId>("free");
   const [usageLimitError, setUsageLimitError] = useState<string | null>(null);
 
@@ -497,7 +504,7 @@ export default function HomePage() {
   async function handleStartComputer() {
     setComputerStarting(true);
     try {
-      const { sandboxId } = await startComputerSession();
+      const { sandboxId } = await startComputerSession(chatId || undefined);
       setComputerSandboxId(sandboxId);
       const liveUrl = await getComputerLiveUrl(sandboxId);
       setComputerStreamUrl(liveUrl);
@@ -509,7 +516,7 @@ export default function HomePage() {
   }
 
   async function handleStopComputer() {
-    if (computerSandboxId) await stopComputerSession(computerSandboxId);
+    if (computerSandboxId) await stopComputerSession(computerSandboxId, chatId || undefined);
     setComputerSandboxId(null);
     setComputerStreamUrl(null);
     setComputerStepLog([]);
@@ -738,6 +745,49 @@ export default function HomePage() {
       return;
     }
 
+    // A big, multi-part request ("build a site AND find leads AND email
+    // them...") gets a small team instead of one specialist. Cheap regex
+    // check first; only asks the model to actually plan it out when that
+    // heuristic says it's plausible.
+    if (looksLikeMissionTask(task)) {
+      const [missionToolIds, missionIntKeys] = await Promise.all([
+        listConnectedPluginIds(user.uid),
+        getIntegrationKeys(user.uid),
+      ]);
+      const tasks = await planMission(provider.id, activeKey, task, model);
+      const rolesUsed = new Set(tasks.map((t) => t.role));
+      const looksLikeRealTeamwork = tasks.length >= 3 && (rolesUsed.size >= 3 || tasks.filter((t) => t.dependsOn.length === 0).length >= 2);
+
+      if (looksLikeRealTeamwork) {
+        const missionId = await createMission(user.uid, task, tasks, currentChatId);
+        const kickoff: ChatMessage = {
+          role: "assistant",
+          content: `This needs a small team — splitting it into ${tasks.length} parts:\n${tasks
+            .map((t) => `- **${t.role}**: ${t.title}`)
+            .join("\n")}\n\nOpen **Agent Team** (next to Settings) to watch it live — I'll post the summary here when it's done.`,
+        };
+        const finalMessages = [...nextMessages, kickoff];
+        setMessages(finalMessages);
+        await persist(finalMessages, currentChatId, activeAgent?.id, provider.id);
+
+        const missionDeps: MissionExecutorDeps = {
+          uid: user.uid,
+          providerId: provider.id,
+          apiKey: activeKey,
+          model,
+          hasBrowser: !!missionIntKeys.browserlessApiKey,
+          hasDaytona: !!missionIntKeys.daytonaApiKey,
+          gmailConnected: missionToolIds.includes("gmail"),
+          calendarConnected: missionToolIds.includes("google-calendar"),
+        };
+        runMission(missionDeps, missionId);
+        setMissionFlowOpen(true);
+        return;
+      }
+      // Not actually a multi-agent job (e.g. planner returned 1-2 simple
+      // steps) — fall through and handle it as a normal message below.
+    }
+
     // Refresh immediately before routing. A connection made seconds ago must be
     // visible to the agent even if the 8-second background sync has not fired yet.
     const freshTools = await refreshToolState();
@@ -904,6 +954,23 @@ export default function HomePage() {
           }
         }
       }
+      if (!handledThisRound && integrationKeys.daytonaApiKey) {
+        const planned = await decideTerminalCommand(provider.id, activeKey, toolLoopMessages, true, model);
+        if (planned) {
+          setAgentStatus(`⌨️ ${planned.reason || planned.command}`);
+          try {
+            const result = await runPlannedCommand(planned.command, currentChatId);
+            handledThisRound = true;
+            externalToolHandled = true;
+            toolResultNote += `\n\nTerminal command result:\n${result}`;
+            toolLoopMessages.push({ role: "assistant", content: `[REAL TOOL RESULT] terminal: ${result}` });
+          } catch (err) {
+            toolResultNote += `\n\nTerminal command failed: ${err instanceof Error ? err.message : "unknown error"}.`;
+          } finally {
+            setAgentStatus(null);
+          }
+        }
+      }
       if (!handledThisRound) break;
     }
 
@@ -970,7 +1037,9 @@ export default function HomePage() {
       setAgentStatus("🖥️ Starting the computer...");
       const recovery = await withRecovery(`computer:${user.uid}`, async () => {
         if (!sbx) {
-          const started = await startComputerSession();
+          const { gpu, reason } = decideComputerStart(task);
+          if (gpu) setAgentStatus(`🖥️ ${reason} Requesting a GPU sandbox…`);
+          const started = await startComputerSession(currentChatId || undefined, gpu);
           sbx = started.sandboxId;
           setComputerSandboxId(sbx);
           const liveUrl = await getComputerLiveUrl(sbx);
@@ -1136,16 +1205,15 @@ export default function HomePage() {
             setModalOpen(true);
           }}
           onOpenScheduler={() => setSchedulerOpen(true)}
-          onOpenPlugins={() => {
+          onOpenConnectors={() => {
             setHighlightToolId(null);
-            setPluginsOpen(true);
+            setConnectorsTab("plugins");
+            setConnectorsOpen(true);
           }}
-          onOpenMCP={() => setMcpOpen(true)}
           onOpenBusinessDNA={() => setBusinessOpen(true)}
           onOpenSkills={() => setSkillsOpen(true)}
           onOpenPricing={() => setPricingOpen(true)}
           onOpenConnections={() => setConnectionsOpen(true)}
-          onOpenMissions={() => setMissionsOpen(true)}
           onLogout={() => signOut(auth)}
         />
       )}
@@ -1259,6 +1327,20 @@ export default function HomePage() {
                 )}
               </button>
               <button
+                onClick={() => setMissionFlowOpen(true)}
+                aria-label="Agent Team"
+                title="Agent Team"
+                className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <circle cx="7" cy="7" r="2" stroke="currentColor" strokeWidth="1.2" />
+                  <circle cx="2.5" cy="3" r="1.3" stroke="currentColor" strokeWidth="1.1" />
+                  <circle cx="11.5" cy="3" r="1.3" stroke="currentColor" strokeWidth="1.1" />
+                  <circle cx="7" cy="12" r="1.3" stroke="currentColor" strokeWidth="1.1" />
+                  <path d="M4.8 5.8 3.2 4M9.2 5.8l1.6-1.8M7 9v1.7" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+                </svg>
+              </button>
+              <button
                 onClick={() => setSettingsOpen(true)}
                 aria-label="Settings"
                 className="focus-ring flex h-7 w-7 items-center justify-center rounded-md border border-ink/10 bg-white text-ink/60 transition-all hover:-translate-y-0.5 hover:text-ink hover:shadow-sm"
@@ -1352,9 +1434,13 @@ export default function HomePage() {
                   need={toolNeed}
                   onOpenPlugins={() => {
                     setHighlightToolId(toolNeed.toolId);
-                    setPluginsOpen(true);
+                    setConnectorsTab("plugins");
+                    setConnectorsOpen(true);
                   }}
-                  onOpenMCP={() => setMcpOpen(true)}
+                  onOpenMCP={() => {
+                    setConnectorsTab("mcp");
+                    setConnectorsOpen(true);
+                  }}
                 />
               )}
 
@@ -1458,34 +1544,6 @@ export default function HomePage() {
         onClose={() => setSchedulerOpen(false)}
         hasConnection={!!connected}
       />
-      <PluginsPanel
-        uid={user.uid}
-        open={pluginsOpen}
-        onClose={() => setPluginsOpen(false)}
-        highlightToolId={highlightToolId}
-        onConnectionsChange={setConnectedToolIds}
-        onOpenMcpWithPrefill={(name, url) => {
-          setMcpPrefill({ name, url });
-          setPluginsOpen(false);
-          setMcpOpen(true);
-        }}
-        maxAllowed={getPlan(planId).maxPluginsAndMcp}
-        currentTotal={connectedToolIds.length + mcpServers.length}
-        onUpgrade={() => {
-          setPluginsOpen(false);
-          setPricingOpen(true);
-        }}
-      />
-      <MCPPanel
-        uid={user.uid}
-        open={mcpOpen}
-        prefill={mcpPrefill}
-        onClose={async () => {
-          setMcpOpen(false);
-          setMcpPrefill(null);
-          await refreshToolState();
-        }}
-      />
       <BusinessDNAPanel
         uid={user.uid}
         open={businessOpen}
@@ -1508,13 +1566,26 @@ export default function HomePage() {
           await refreshChats();
         }}
       />
-      <MissionPanel
+      <ConnectorsPanel
         uid={user.uid}
-        open={missionsOpen}
-        onClose={() => setMissionsOpen(false)}
-        activeConnection={activeConnection}
-        currentChatId={chatId}
+        open={connectorsOpen}
+        initialTab={connectorsTab}
+        onClose={() => setConnectorsOpen(false)}
+        highlightToolId={highlightToolId}
+        onConnectionsChange={setConnectedToolIds}
+        mcpPrefill={mcpPrefill}
+        onMcpRefreshed={async () => {
+          setMcpPrefill(null);
+          await refreshToolState();
+        }}
+        maxAllowed={getPlan(planId).maxPluginsAndMcp}
+        currentTotal={connectedToolIds.length + mcpServers.length}
+        onUpgrade={() => {
+          setConnectorsOpen(false);
+          setPricingOpen(true);
+        }}
       />
+      <MissionFlowPanel uid={user.uid} open={missionFlowOpen} onClose={() => setMissionFlowOpen(false)} chatId={chatId} />
       {chatId && agentIdentity && (
         <AgentSettingsModal
           open={agentSettingsOpen}
