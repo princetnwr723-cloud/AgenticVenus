@@ -52,7 +52,10 @@ export type StartComputerOptions = { uid?: string; scope?: string; gpu?: boolean
 export async function startComputer(apiKey: string, opts: StartComputerOptions = {}): Promise<{ sandboxId: string; gpuRequested: boolean }> {
   if (!apiKey) throw new Error("No Daytona API key — add yours in Settings → Integrations.");
   const { uid, gpu } = opts;
-  const scope = sanitizeScope(opts.scope);
+  // One persistent computer per user by default. Chat IDs are conversation
+  // state, not machine identity; using them here caused a new desktop for
+  // every chat and prevented browser/app/session handoffs.
+  const scope = sanitizeScope(opts.scope || "primary");
   const daytona = new Daytona({ apiKey });
 
   let sandbox: any = null;
