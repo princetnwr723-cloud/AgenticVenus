@@ -2,11 +2,14 @@
 
 // components/PluginsPanel.tsx
 // Tools with a dedicated OAuth app (see lib/oauthProviders.ts) show a
-// real "Continue with X" button — click it, log in on that service,
-// approve access, and you're back here connected for real, exactly like
-// Grok or Claude's plugin pickers. Tools with a public MCP server but no
-// dedicated app open the MCP connect flow instead. Everything else still
-// shows the placeholder toggle until one of those paths is wired for it.
+// real "Continue with X" button — click it, log in on that service, and
+// you're back here connected for real, exactly like Grok or Claude's plugin
+// pickers. Tools with a public MCP server but no dedicated app open the MCP
+// connect flow instead.
+//
+// `embedded`: when true, renders WITHOUT its own SlideOverPanel wrapper (no
+// title/close button) so it can be composed inside ConnectorsPanel's
+// "Plugins" tab instead of being its own separate slide-over.
 
 import { useEffect, useState } from "react";
 import SlideOverPanel from "@/components/SlideOverPanel";
@@ -26,6 +29,7 @@ type Props = {
   maxAllowed: number;
   currentTotal: number;
   onUpgrade: () => void;
+  embedded?: boolean;
 };
 
 export default function PluginsPanel({
@@ -38,6 +42,7 @@ export default function PluginsPanel({
   maxAllowed,
   currentTotal,
   onUpgrade,
+  embedded = false,
 }: Props) {
   const atLimit = currentTotal >= maxAllowed;
   const [connected, setConnected] = useState<string[]>([]);
@@ -110,13 +115,8 @@ export default function PluginsPanel({
     setBusyId(null);
   }
 
-  return (
-    <SlideOverPanel
-      open={open}
-      onClose={onClose}
-      title="Plugins"
-      subtitle="Connect the tools your agent should be able to use."
-    >
+  const body = (
+    <>
       {error && <p className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
       {atLimit && (
         <div className="mb-4 flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
@@ -242,8 +242,26 @@ export default function PluginsPanel({
         powered by a single key/token rather than an account login.{" "}
         <strong className="text-clay">Connect (real)</strong> opens the
         same real flow through that tool's official MCP server. Plain
-        "Connect" just marks a tool as available for now.
+        "Connect" just marks a tool as available for now. You can also just
+        tell the agent in chat, e.g. "connect Slack" — it opens this panel
+        for you.
       </p>
+    </>
+  );
+
+  if (embedded) {
+    if (!open) return null;
+    return <div>{loading ? <p className="text-sm text-ink/50">Loading...</p> : body}</div>;
+  }
+
+  return (
+    <SlideOverPanel
+      open={open}
+      onClose={onClose}
+      title="Plugins"
+      subtitle="Connect the tools your agent should be able to use."
+    >
+      {loading ? <p className="text-sm text-ink/50">Loading...</p> : body}
     </SlideOverPanel>
   );
 }
