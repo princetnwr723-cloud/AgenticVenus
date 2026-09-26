@@ -9,11 +9,11 @@ export async function POST(req: NextRequest) {
     if (!idToken) return NextResponse.json({ error: "Missing auth token." }, { status: 401 });
     const decoded = await adminAuth().verifyIdToken(idToken);
 
-    const { sandboxId } = await req.json();
+    const { sandboxId, scope } = await req.json();
     if (!sandboxId) return NextResponse.json({ error: "sandboxId is required." }, { status: 400 });
 
     const apiKey = await resolveIntegrationSecret(decoded.uid, "daytonaApiKey");
-    if (apiKey) await stopComputer(sandboxId, apiKey, decoded.uid);
+    if (apiKey) await stopComputer(sandboxId, apiKey, decoded.uid, scope);
 
     return NextResponse.json({ ok: true });
   } catch (err) {
