@@ -14,17 +14,29 @@ const MAX_PARSE_FAILURES = 3;
 const MAX_ACTION_ERRORS = 3;
 const MODEL_IMAGE_EDGE = 1280;
 
+const GPU_HINT = /\bgpu\b|\bcuda\b|stable diffusion|train(ing)? (a )?model|fine-?tune|llama\.cpp|pytorch|tensorflow|render(ing)? (video|3d)|blender render|whisper (large|transcribe)/i;
+
+/** Decide once, from the request text, whether this needs a GPU box — a tiny
+ * task ("open a browser and check X") gets the normal, fast desktop; a
+ * GPU-shaped one ("train a small model", "run stable diffusion") asks for a
+ * GPU sandbox and, if Daytona says the plan/capacity doesn't allow it, that
+ * real reason is what gets reported back instead of silently downgrading. */
+export function decideComputerStart(task: string): { gpu: boolean; reason: string } {
+  if (GPU_HINT.test(task)) return { gpu: true, reason: "This looks like it needs GPU compute (training/inference/rendering)." };
+  return { gpu: false, reason: "A normal desktop is enough for this." };
+}
+
 async function authedHeaders() {
   const idToken = await auth.currentUser?.getIdToken();
   if (!idToken) throw new Error("Not signed in.");
   return { "content-type": "application/json", authorization: `Bearer ${idToken}` };
 }
 
-export async function startComputerSession(): Promise<{ sandboxId: string; streamUrl: string }> {
-  const res = await fetch("/api/computer/start", { method: "POST", headers: await authedHeaders() });
+export async function startComputerSession(scope?: string, gpu = false): Promise<{ sandboxId: string; gpuRequested: boolean }> {
+  const res = await fetch("/api/computer/start", { method: "POST", headers: await authedHeaders(), body: JSON.stringify({ scope, gpu }) });
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error || "Failed to start the cloud computer.");
-  return { sandboxId: data.sandboxId, streamUrl: data.streamUrl };
+  return { sandboxId: data.sandboxId, gpuRequested: !!data.gpuRequested };
 }
 
 async function act(sandboxId: string, action: ComputerAction): Promise<string> {
@@ -45,37 +57,22 @@ export async function getComputerLiveUrl(sandboxId: string): Promise<string> {
   return data.url as string;
 }
 
-export async function stopComputerSession(sandboxId: string): Promise<void> {
+export async function stopComputerSession(sandboxId: string, scope?: string): Promise<void> {
   try {
     await fetch("/api/computer/stop", {
       method: "POST",
       headers: await authedHeaders(),
-      body: JSON.stringify({ sandboxId }),
+      body: JSON.stringify({ sandboxId, scope }),
     });
   } catch {
     // Best-effort.
   }
 }
 
-type Decision = {
-  action?: string;
-  x?: number;
-  y?: number;
-  x1?: number;
-  y1?: number;
-  x2?: number;
-  y2?: number;
-  button?: "left" | "right" | "middle";
-  text?: string;
-  key?: string;
-  keys?: string;
-  amount?: number;
-  direction?: "up" | "down";
-  command?: string;
-  ms?: number;
-  summary?: string;
-  reason?: string;
-};
+function extractJson(text: string): string {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  return (fenced ? fenced[1] : text).trim();
+}
 
 /** Screenshots come back as PNG from Daytona; detect the real mime type. */
 function mimeOf(base64: string): string {
@@ -157,7 +154,7 @@ RULES
       throw new Error(`The AI provider failed while driving the computer: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const d = parseFirstJson<Decision>(text);
+    const d = parseFirstJson<any>(text) as any;
     if (!d || !d.action) {
       parseFailures++;
       if (parseFailures >= MAX_PARSE_FAILURES) {
@@ -180,7 +177,6 @@ RULES
       return `Could not complete the task: ${d.reason || "unknown reason"}.`;
     }
 
-    // Model coordinates -> real screen pixels.
     const px = (n: number | undefined) => Math.round((Number(n) || 0) * shot.factor);
     let action: ComputerAction | null = null;
     let label: string = d.action;
@@ -205,7 +201,7 @@ RULES
         }
         break;
       case "drag":
-        if ([d.x1, d.y1, d.x2, d.y2].every((n) => typeof n === "number")) {
+        if ([d.x1, d.y1, d.x2, d.y2].every((n: any) => typeof n === "number")) {
           action = { type: "drag", x1: px(d.x1), y1: px(d.y1), x2: px(d.x2), y2: px(d.y2) };
           label = `drag (${d.x1},${d.y1}) → (${d.x2},${d.y2})`;
         }
@@ -230,13 +226,7 @@ RULES
         break;
       case "scroll": {
         const direction = d.direction === "up" || (d.amount ?? 0) < 0 ? "up" : "down";
-        action = {
-          type: "scroll",
-          amount: Math.max(1, Math.min(Math.abs(Number(d.amount) || 5), 10)),
-          x: d.x !== undefined ? px(d.x) : undefined,
-          y: d.y !== undefined ? px(d.y) : undefined,
-          direction,
-        };
+        action = { type: "scroll", amount: Math.max(1, Math.min(Math.abs(Number(d.amount) || 5), 10)), x: d.x !== undefined ? px(d.x) : undefined, y: d.y !== undefined ? px(d.y) : undefined, direction };
         label = `scroll ${direction}`;
         break;
       }
