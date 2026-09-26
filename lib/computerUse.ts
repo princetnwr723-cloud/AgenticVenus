@@ -22,7 +22,8 @@ import { Daytona } from "@daytona/sdk";
 import { adminDb } from "@/lib/firebaseAdmin";
 import { sanitizeScope } from "@/lib/workspaceScope";
 
-const COLLECTION = "computerWorkspace";
+const COLLECTION = "agentWorkspace";
+const DOC_ID = "default";
 
 export type ComputerAction =
   | { type: "screenshot" }
@@ -39,12 +40,12 @@ export type ComputerAction =
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function getStoredSandboxId(uid: string, scope: string): Promise<string | undefined> {
-  const snap = await adminDb().collection("users").doc(uid).collection(COLLECTION).doc(scope).get();
+  const snap = await adminDb().collection("users").doc(uid).collection(COLLECTION).doc(DOC_ID).get();
   return snap.exists ? (snap.data()?.sandboxId as string | undefined) : undefined;
 }
 
 async function saveSandboxId(uid: string, scope: string, sandboxId: string) {
-  await adminDb().collection("users").doc(uid).collection(COLLECTION).doc(scope).set({ sandboxId, updatedAt: Date.now() }, { merge: true });
+  await adminDb().collection("users").doc(uid).collection(COLLECTION).doc(DOC_ID).set({ sandboxId, updatedAt: Date.now() }, { merge: true });
 }
 
 export type StartComputerOptions = { uid?: string; scope?: string; gpu?: boolean };
@@ -52,9 +53,6 @@ export type StartComputerOptions = { uid?: string; scope?: string; gpu?: boolean
 export async function startComputer(apiKey: string, opts: StartComputerOptions = {}): Promise<{ sandboxId: string; gpuRequested: boolean }> {
   if (!apiKey) throw new Error("No Daytona API key — add yours in Settings → Integrations.");
   const { uid, gpu } = opts;
-  // One persistent computer per user by default. Chat IDs are conversation
-  // state, not machine identity; using them here caused a new desktop for
-  // every chat and prevented browser/app/session handoffs.
   const scope = sanitizeScope(opts.scope || "primary");
   const daytona = new Daytona({ apiKey });
 
