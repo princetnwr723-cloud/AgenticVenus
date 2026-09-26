@@ -10,6 +10,7 @@ import type { BrowserAction, BrowserElement, SearchEngine } from "@/lib/browserU
 const MAX_STEPS = 40;
 const MAX_PARSE_FAILURES = 3;
 const MAX_ACTION_ERRORS = 3;
+const MAX_CAPTCHA_WAITS = 4;
 
 async function authedHeaders() {
   const idToken = await auth.currentUser?.getIdToken();
@@ -39,6 +40,7 @@ type ActResult = {
   title?: string;
   width?: number;
   height?: number;
+  captchaLikely?: boolean;
 };
 
 async function act(sessionId: string, action: BrowserAction): Promise<ActResult> {
@@ -100,6 +102,7 @@ export async function runBrowserTask(
   let lastExtract = "";
   let parseFailures = 0;
   let actionErrors = 0;
+  let captchaWaits = 0;
   let lastSignature = "";
   let repeats = 0;
   let hint = "";
@@ -109,6 +112,10 @@ export async function runBrowserTask(
     const height = state.height || 800;
     const elements = state.elements || [];
 
+    const captchaNote = state.captchaLikely
+      ? `\nHEADS UP: this looks like a bot-check / CAPTCHA page. Browserless auto-solves most of these in the background within 15-30 seconds — do NOT give up or change strategy immediately. Use {"action":"wait","ms":8000} once or twice and check again before deciding it's really stuck. If it's genuinely still blocking after a few waits, try {"action":"search","engine":"bing"} or "duckduckgo" instead of Google, which gets flagged far less.\n`
+      : "";
+
     const prompt = `You are operating a real remote Chrome browser to accomplish this task:
 "${task}"
 
@@ -116,7 +123,7 @@ CURRENT PAGE
 url: ${state.url || "(blank)"}
 title: ${state.title || "(none)"}
 The attached screenshot is exactly ${width}x${height} pixels and shows the visible viewport. Pixel coordinates you give map 1:1 onto it.
-
+${captchaNote}
 CLICKABLE ELEMENTS VISIBLE RIGHT NOW (centre coordinates are exact):
 ${describeElements(elements)}
 
@@ -124,7 +131,7 @@ WHAT YOU HAVE DONE SO FAR
 ${history.length ? history.slice(-10).join("\n") : "(nothing yet)"}
 ${lastExtract ? `\nTEXT YOU EXTRACTED IN THE PREVIOUS STEP (use it, then continue or finish):\n${lastExtract.slice(0, 5000)}\n` : ""}${hint ? `\nNOTE: ${hint}\n` : ""}
 Decide the SINGLE next action. Reply with ONLY raw JSON in one of these shapes:
-{"action":"search","query":"...","engine":"duckduckgo"}   (opens a web search directly — engine may be duckduckgo, bing or google)
+{"action":"search","query":"...","engine":"duckduckgo"}   (opens a web search directly — engine may be duckduckgo, bing or google; prefer duckduckgo/bing, Google flags automated traffic fastest)
 {"action":"goto","url":"https://..."}
 {"action":"click_element","index":7}                       (PREFERRED way to click — index from the list above)
 {"action":"click","x":number,"y":number}                   (only if the target is not in the list)
@@ -133,7 +140,7 @@ Decide the SINGLE next action. Reply with ONLY raw JSON in one of these shapes:
 {"action":"scroll","amount":600}                           (positive = down)
 {"action":"back"}
 {"action":"extractText"}                                   (reads the page text — use this to collect data)
-{"action":"wait","ms":1000}
+{"action":"wait","ms":8000}                                (use this while a captcha is auto-solving)
 {"action":"done","summary":"the actual findings/result, with concrete details"}
 {"action":"fail","reason":"why this can't be completed"}
 
@@ -141,7 +148,7 @@ RULES
 - To look something up, use "search" instead of clicking a search box.
 - Prefer click_element over raw coordinates. Focus an input with click_element, then "type".
 - To gather information, use "extractText" and put the real facts in "done.summary" — not "I found it".
-- Dismiss cookie/consent pop-ups if they block the page. If you hit a captcha or block page, try another site or search engine.
+- Dismiss cookie/consent pop-ups if they block the page.
 - Never repeat the same action expecting a different result; change approach.
 - Stay on task. Use "done" as soon as the task is genuinely complete.`;
 
@@ -186,6 +193,10 @@ RULES
     if (decision.action === "fail") {
       onStep?.(`Couldn't complete: ${decision.reason || "unknown reason"}`);
       return `Could not complete the task: ${decision.reason || "unknown reason"}.`;
+    }
+    if (decision.action === "wait" && state.captchaLikely) {
+      captchaWaits++;
+      if (captchaWaits > MAX_CAPTCHA_WAITS) hint = "Waiting hasn't cleared the captcha after several tries — switch to a different search engine or site instead of waiting again.";
     }
 
     // ---- translate the decision into a concrete browser action ----
@@ -245,6 +256,7 @@ RULES
         break;
       case "wait":
         action = { type: "wait", ms: Number(decision.ms) || 800 };
+        label = `wait ${Number(decision.ms) || 800}ms`;
         break;
     }
 
@@ -256,15 +268,17 @@ RULES
       continue;
     }
 
-    // ---- loop detection ----
-    const signature = `${label}@${state.url}`;
-    repeats = signature === lastSignature ? repeats + 1 : 0;
-    lastSignature = signature;
-    if (repeats >= 4) {
-      onStep?.("Stuck repeating the same action — stopping.");
-      return `Stopped because the browser got stuck repeating "${label}" on ${state.url}. Partial notes: ${collected.join("\n").slice(0, 1500) || "none"}`;
+    // ---- loop detection (waits during an active captcha don't count as stuck) ----
+    if (action.type !== "wait" || !state.captchaLikely) {
+      const signature = `${label}@${state.url}`;
+      repeats = signature === lastSignature ? repeats + 1 : 0;
+      lastSignature = signature;
+      if (repeats >= 4) {
+        onStep?.("Stuck repeating the same action — stopping.");
+        return `Stopped because the browser got stuck repeating "${label}" on ${state.url}. Partial notes: ${collected.join("\n").slice(0, 1500) || "none"}`;
+      }
+      if (repeats >= 2) hint = `You have repeated "${label}" ${repeats + 1} times with no progress. Try a different element, scroll, or another site.`;
     }
-    if (repeats >= 2) hint = `You have repeated "${label}" ${repeats + 1} times with no progress. Try a different element, scroll, or another site.`;
 
     onStep?.(`Step ${step + 1}: ${label}`);
 
@@ -279,7 +293,7 @@ RULES
         history.push(`${history.length + 1}. extractText on ${result.title || result.url}`);
       } else {
         lastExtract = "";
-        history.push(`${history.length + 1}. ${label} → now on "${result.title || result.url || "?"}"`);
+        history.push(`${history.length + 1}. ${label} → now on "${result.title || result.url || "?"}"${result.captchaLikely ? " (captcha page)" : ""}`);
       }
     } catch (err) {
       actionErrors++;
