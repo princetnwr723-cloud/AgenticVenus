@@ -1,6 +1,28 @@
 // lib/computerUse.ts
+// The Cloud Computer (a real remote desktop) now gets its OWN Daytona
+// sandbox PER CHAT (`scope`, normally the chatId) — unlike the coding
+// workspace, a GUI desktop can't share one sandbox via folders, so "har chat
+// me alag PC" means a genuinely separate sandbox per chat here.
+//
+// INTERNET ACCESS: Daytona sandboxes on paid tiers already have internet
+// access by default (network is only blocked if you explicitly ask for it),
+// so `networkBlockAll: false` is set explicitly as a safety net rather than
+// something that "turns it on". IMPORTANT HONESTY NOTE, from Daytona's own
+// docs: on Daytona's Tier 1 and Tier 2 (the lower usage/verification tiers),
+// network access for sandboxes is restricted at the ACCOUNT level and Daytona
+// rejects any attempt to override it per-sandbox — there is no code fix for
+// that; the only way to get internet in sandboxes on those tiers is to
+// verify/upgrade the Daytona organization's tier in their dashboard.
+//
+// GPU: Daytona GPU sandboxes are a distinct, on-demand resource with their
+// own capacity/plan requirements. This makes a best-effort request and — if
+// Daytona rejects it (wrong plan, no GPU capacity available, etc.) — surfaces
+// Daytona's own error message honestly instead of pretending it worked.
 import { Daytona } from "@daytona/sdk";
 import { adminDb } from "@/lib/firebaseAdmin";
+import { sanitizeScope } from "@/lib/workspaceScope";
+
+const COLLECTION = "computerWorkspace";
 
 export type ComputerAction =
   | { type: "screenshot" }
@@ -16,21 +38,54 @@ export type ComputerAction =
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export async function startComputer(apiKey: string, uid?: string): Promise<{ sandboxId: string }> {
+async function getStoredSandboxId(uid: string, scope: string): Promise<string | undefined> {
+  const snap = await adminDb().collection("users").doc(uid).collection(COLLECTION).doc(scope).get();
+  return snap.exists ? (snap.data()?.sandboxId as string | undefined) : undefined;
+}
+
+async function saveSandboxId(uid: string, scope: string, sandboxId: string) {
+  await adminDb().collection("users").doc(uid).collection(COLLECTION).doc(scope).set({ sandboxId, updatedAt: Date.now() }, { merge: true });
+}
+
+export type StartComputerOptions = { uid?: string; scope?: string; gpu?: boolean };
+
+export async function startComputer(apiKey: string, opts: StartComputerOptions = {}): Promise<{ sandboxId: string; gpuRequested: boolean }> {
   if (!apiKey) throw new Error("No Daytona API key — add yours in Settings → Integrations.");
+  const { uid, gpu } = opts;
+  const scope = sanitizeScope(opts.scope);
   const daytona = new Daytona({ apiKey });
-  const ref = uid ? adminDb().collection("users").doc(uid).collection("computerWorkspace").doc("default") : null;
+
   let sandbox: any = null;
-  if (ref) {
-    const snap = await ref.get();
-    const existingId = snap.exists ? (snap.data()?.sandboxId as string | undefined) : undefined;
+  if (uid) {
+    const existingId = await getStoredSandboxId(uid, scope);
     if (existingId) sandbox = await daytona.get(existingId).catch(() => null);
   }
-  if (!sandbox) sandbox = await daytona.create({ language: "typescript", autoDeleteInterval: -1 });
-  if (sandbox.state && sandbox.state !== "started") await sandbox.start(60).catch(() => undefined);
+
+  if (!sandbox) {
+    const createOpts: any = { language: "typescript", autoDeleteInterval: -1, networkBlockAll: false };
+    if (gpu) {
+      // Best-effort GPU request — Daytona will reject this with its own
+      // clear error if the plan/capacity doesn't support it, which we
+      // surface as-is rather than guessing at a different shape.
+      try {
+        sandbox = await daytona.create({ ...createOpts, resources: { gpu: 1 } });
+      } catch (err) {
+        throw new Error(
+          `GPU sandbox request failed — this usually means your Daytona plan doesn't include GPU capacity, or none is available right now. Daytona said: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    } else {
+      sandbox = await daytona.create(createOpts);
+    }
+  } else if (sandbox.state && sandbox.state !== "started") {
+    await sandbox.start(60).catch(() => undefined);
+  }
+
   await sandbox.computerUse.start();
-  if (ref) await ref.set({ sandboxId: sandbox.id, updatedAt: Date.now() }, { merge: true });
-  return { sandboxId: sandbox.id };
+  if (uid) await saveSandboxId(uid, scope, sandbox.id);
+  return { sandboxId: sandbox.id, gpuRequested: !!gpu };
 }
 
 /** Signed preview URL — auth token is embedded in the URL itself, so no
@@ -50,40 +105,18 @@ export async function getSignedPreviewUrl(
   return { url: data.url, token: data.token };
 }
 
-/** Daytona's ScreenshotResponse keeps the base64 image in `screenshot`. The old
- * code only looked at `image`/`data`, so it could end up sending the literal
- * text "[object Object]" to the model as the "screenshot". */
+/** Daytona's ScreenshotResponse keeps the base64 image in `screenshot`. */
 function extractBase64(shot: any): string {
-  const raw =
-    typeof shot === "string"
-      ? shot
-      : shot?.screenshot ?? shot?.image ?? shot?.data ?? shot?.base64 ?? "";
+  const raw = typeof shot === "string" ? shot : shot?.screenshot ?? shot?.image ?? shot?.data ?? shot?.base64 ?? "";
   if (typeof raw !== "string" || !raw) throw new Error("Daytona returned an empty screenshot.");
   return raw.replace(/^data:[^,]+,/, "");
 }
 
 const KEY_ALIASES: Record<string, string> = {
-  enter: "Return",
-  return: "Return",
-  esc: "Escape",
-  escape: "Escape",
-  del: "Delete",
-  delete: "Delete",
-  backspace: "BackSpace",
-  tab: "Tab",
-  space: "space",
-  up: "Up",
-  down: "Down",
-  left: "Left",
-  right: "Right",
-  arrowup: "Up",
-  arrowdown: "Down",
-  arrowleft: "Left",
-  arrowright: "Right",
-  pageup: "Page_Up",
-  pagedown: "Page_Down",
-  home: "Home",
-  end: "End",
+  enter: "Return", return: "Return", esc: "Escape", escape: "Escape", del: "Delete", delete: "Delete",
+  backspace: "BackSpace", tab: "Tab", space: "space", up: "Up", down: "Down", left: "Left", right: "Right",
+  arrowup: "Up", arrowdown: "Down", arrowleft: "Left", arrowright: "Right", pageup: "Page_Up", pagedown: "Page_Down",
+  home: "Home", end: "End",
 };
 
 function normalizeKey(key: string): string {
@@ -129,7 +162,6 @@ export async function runComputerAction(
       break;
     }
     case "launch": {
-      // Start a GUI app on the remote desktop (DISPLAY :0), detached so it keeps running.
       const cmd = action.command.replace(/'/g, "'\\''");
       await sandbox.process.executeCommand(`nohup sh -c '${cmd}' >/tmp/av-launch.log 2>&1 &`, undefined, { DISPLAY: ":0" }, 15);
       await sleep(2500);
@@ -140,27 +172,20 @@ export async function runComputerAction(
       break;
   }
 
-  // Let the UI repaint before we look at it again.
   if (action.type !== "screenshot" && action.type !== "wait") await sleep(600);
 
   const shot = await cu.screenshot.takeFullScreen();
   return { screenshotBase64: extractBase64(shot) };
 }
 
-export async function stopComputer(sandboxId: string, apiKey: string, uid?: string): Promise<void> {
+export async function stopComputer(sandboxId: string, apiKey: string, uid?: string, scope?: string): Promise<void> {
   const daytona = new Daytona({ apiKey });
   const sandbox = await daytona.get(sandboxId).catch(() => null);
   if (sandbox) {
     if (typeof sandbox.stop === "function") await sandbox.stop(60);
     else await sandbox.delete();
   }
-  // Keep the sandbox id so a later Start computer resumes the same cloud PC/files.
-  if (uid)
-    await adminDb()
-      .collection("users")
-      .doc(uid)
-      .collection("computerWorkspace")
-      .doc("default")
-      .set({ sandboxId, updatedAt: Date.now() }, { merge: true })
-      .catch(() => undefined);
+  // Keep the sandbox id so a later Start computer resumes the SAME desktop —
+  // same files, same browser logins, same everything, per chat.
+  if (uid) await saveSandboxId(uid, sanitizeScope(scope), sandboxId).catch(() => undefined);
 }
