@@ -5,6 +5,11 @@ import { runMissionTask, type ExecutorDeps } from "@/lib/mission/executor";
 import type { Mission, MissionTask } from "@/lib/mission/types";
 import { saveChatMessages, getChat } from "@/lib/chats";
 
+// Re-exported so consumers (e.g. app/home/page.tsx) can import ExecutorDeps
+// directly from "@/lib/missionRunner" instead of reaching into
+// "@/lib/mission/executor" themselves.
+export type { ExecutorDeps };
+
 function readyTasks(mission: Mission): MissionTask[] {
   const doneIds = new Set(mission.tasks.filter((t) => t.status === "done").map((t) => t.id));
   return mission.tasks.filter((t) => t.status === "pending" && t.dependsOn.every((d) => doneIds.has(d)));
