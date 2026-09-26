@@ -33,7 +33,7 @@ async function authedHeaders() {
 }
 
 export async function startComputerSession(scope?: string, gpu = false): Promise<{ sandboxId: string; gpuRequested: boolean }> {
-  const res = await fetch("/api/computer/start", { method: "POST", headers: await authedHeaders(), body: JSON.stringify({ scope, gpu }) });
+  const res = await fetch("/api/computer/start", { method: "POST", headers: await authedHeaders(), body: JSON.stringify({ scope: scope || "primary", gpu }) });
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error || "Failed to start the cloud computer.");
   return { sandboxId: data.sandboxId, gpuRequested: !!data.gpuRequested };
