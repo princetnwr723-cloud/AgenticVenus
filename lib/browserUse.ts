@@ -1,391 +1,1055 @@
-// lib/browserUse.ts
-// Real browser automation via Browserless — connects a remote Chrome over CDP
-// with the user's own token.
-//
-// CAPTCHA / "I'm not a robot" FIX
-//  Browserless's plain connection endpoint has no anti-detection at all, so
-//  ordinary automated traffic (especially hitting Google search directly)
-//  reliably tripped bot-checks. Two real Browserless features fix this:
-//   - the `/stealth` route: fingerprint randomization + automation-signal
-//     hiding (free, no extra cost)
-//   - `solveCaptchas=true`: Browserless detects and solves reCAPTCHA /
-//     Cloudflare / hCaptcha challenges INSIDE the session automatically.
-//     Per Browserless's own docs this only bills (a small per-solve unit
-//     cost) on a SUCCESSFUL solve — a challenge it can't clear costs nothing.
-//  Combined with defaulting web searches to DuckDuckGo instead of Google
-//  (already the default below — Google is by far the most aggressive at
-//  flagging automated traffic), this is what actually gets past the
-//  checkbox/captcha wall instead of getting stuck on it.
-//
-// SESSION LENGTH
-//  Browserless session/reconnect limits are plan-based (free plan: ~1-2
-//  minutes; paid plans scale up to 30-60 minutes). We now explicitly ask for
-//  a 30-minute session and a 30-minute reconnect window on every connection —
-//  Browserless silently caps this to whatever the account's plan actually
-//  allows, so this is always safe to request regardless of plan.
-//
-// WHY THE AGENT USED TO CLICK BELOW THE SEARCH ICON (kept from the previous
-// fix): the viewport is pinned to 1280x800 at deviceScaleFactor 1, so
-// screenshot pixels always equal page pixels, and every action response also
-// returns a numbered map of the visible clickable elements with their real
-// centre coordinates so the model can say "click element 7" instead of
-// guessing pixels.
+// lib/serverDeveloperRuntime.ts
 
-import puppeteer, { type Browser, type Page } from "puppeteer-core";
-import { adminDb } from "@/lib/firebaseAdmin";
+import { sendChatMessage, type ChatMessage } from "@/lib/chatClient";
+import { extractCodeFiles } from "@/lib/codeExtract";
+import { AGENT_CORE, DEV_CRAFT_GUIDE } from "@/lib/agents";
 
-const REGION = "production-sfo.browserless.io";
-// Requested session/reconnect length — Browserless clamps this to the
-// account's actual plan limit, so asking for the max is always safe.
-const REQUESTED_SESSION_MS = 30 * 60 * 1000;
-const NAV_TIMEOUT_MS = 45_000; // generous — captcha-solving needs real time to run
+import {
+  ensureWorkspace,
+  workspaceListFiles,
+  workspaceWriteFile,
+  workspaceExec,
+  workspaceSessionExec,
+  workspaceListeningPorts,
+  workspaceFreePort,
+  workspacePreview,
+} from "@/lib/workspaceRuntime";
 
-export const BROWSER_VIEWPORT = { width: 1280, height: 800 };
+import { portForScope } from "@/lib/workspaceScope";
 
-export type BrowserElement = {
-  index: number;
-  tag: string;
-  label: string;
-  type?: string;
-  x: number; // centre, in screenshot pixels
-  y: number;
-  w: number;
-  h: number;
+export type ServerDeveloperResult = {
+  changedFiles: string[];
+  buildOutput: string;
+  buildOk: boolean;
+  previewUrl?: string;
+  previewPort?: number;
+  steps: string[];
 };
 
-export type SearchEngine = "duckduckgo" | "google" | "bing";
-
-export type BrowserAction =
-  | { type: "screenshot" }
-  | { type: "goto"; url: string }
-  | { type: "search"; query: string; engine?: SearchEngine }
-  | { type: "back" }
-  | { type: "click"; x: number; y: number; button?: "left" | "right" | "middle"; double?: boolean }
-  | { type: "type"; text: string; submit?: boolean; clear?: boolean }
-  | { type: "key"; key: string }
-  | { type: "scroll"; amount: number }
-  | { type: "extractText" }
-  | { type: "wait"; ms: number };
-
-export type BrowserActionResult = {
-  screenshotBase64?: string;
-  text?: string;
-  elements?: BrowserElement[];
-  url?: string;
-  title?: string;
-  width: number;
-  height: number;
-  /** Heuristic: the page looks like a bot-check/captcha wall right now. */
-  captchaLikely?: boolean;
+/**
+ * IMPORTANT:
+ *
+ * workspaceListFiles() can return files with only:
+ *   { path: string }
+ *
+ * or, when includeContent=true:
+ *   { path: string, content: string }
+ *
+ * Therefore content MUST be optional here.
+ */
+type ExistingWorkspaceFile = {
+  path: string;
+  content?: string;
 };
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+type GeneratedFile = {
+  id: string;
+  filename: string;
+  language: string;
+  code: string;
+};
 
-function connectionUrl(apiKey: string, extra = ""): string {
-  // /stealth = anti-detection route. solveCaptchas=true = automatic
-  // challenge solving (billed only when it actually solves one).
-  return `wss://${REGION}/stealth?token=${apiKey}&solveCaptchas=true&timeout=${REQUESTED_SESSION_MS}${extra}`;
+function cleanPath(input: string): string | null {
+  const value = String(input || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/^\.\/+/, "");
+
+  if (!value) return null;
+
+  if (
+    value.includes("..") ||
+    value.startsWith("~") ||
+    value.includes("\0")
+  ) {
+    return null;
+  }
+
+  return value;
 }
 
-async function saveSession(uid: string, sessionId: string, reconnectEndpoint: string) {
-  await adminDb().collection("users").doc(uid).collection("browserSessions").doc(sessionId).set({
-    reconnectEndpoint,
-    createdAt: Date.now(),
-  });
+function sleep(ms: number) {
+  return new Promise<void>((resolve) =>
+    setTimeout(resolve, ms),
+  );
 }
 
-async function loadReconnectEndpoint(uid: string, sessionId: string): Promise<string> {
-  const snap = await adminDb().collection("users").doc(uid).collection("browserSessions").doc(sessionId).get();
-  if (!snap.exists) throw new Error("Browser session not found or expired.");
-  return snap.data()!.reconnectEndpoint as string;
-}
+async function notifyStep(
+  steps: string[],
+  message: string,
+  onStep?: (step: string) => Promise<void> | void,
+) {
+  steps.push(message);
 
-/** Calls Browserless.reconnect on an already-connected browser and returns a
- * fresh, token-bearing endpoint — requests the full 30 minutes; Browserless
- * clamps this to whatever the plan actually allows. */
-async function refreshReconnectEndpoint(browser: Browser, apiKey: string): Promise<string> {
-  const page = (await browser.pages())[0] || (await browser.newPage());
-  const cdp = await page.createCDPSession();
-  const { error, browserWSEndpoint } = (await cdp.send("Browserless.reconnect" as any, {
-    timeout: REQUESTED_SESSION_MS,
-  } as any)) as { error?: string; browserWSEndpoint?: string };
-  if (error || !browserWSEndpoint) throw new Error(error || "Browserless didn't return a reconnect endpoint.");
-  return `${browserWSEndpoint}?token=${apiKey}&solveCaptchas=true`;
-}
-
-/** The page the user/agent is actually looking at (popups open new tabs), with
- * the viewport pinned so screenshot pixels always equal page pixels. */
-async function activePage(browser: Browser): Promise<Page> {
-  const pages = await browser.pages();
-  const page = pages[pages.length - 1] || (await browser.newPage());
-  await page.setViewport({ ...BROWSER_VIEWPORT, deviceScaleFactor: 1 }).catch(() => undefined);
-  page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
-  return page;
-}
-
-async function settle(page: Page, extraMs = 500) {
-  await page.waitForNetworkIdle({ idleTime: 350, timeout: 5000 }).catch(() => undefined);
-  await sleep(extraMs);
-}
-
-/** Cheap heuristic so the agent (and its prompt) can tell it hit a bot-check
- * wall rather than the real page, and know to just wait rather than give up. */
-async function detectCaptcha(page: Page): Promise<boolean> {
   try {
-    return await page.evaluate(() => {
-      const text = (document.body?.innerText || "").toLowerCase();
-      const hasFrame = !!document.querySelector('iframe[src*="recaptcha"],iframe[src*="hcaptcha"],iframe[title*="challenge"],#turnstile-wrapper,.cf-turnstile');
-      const hasText = /unusual traffic|i'm not a robot|verify you are human|checking your browser|complete the security check/.test(text);
-      return hasFrame || hasText;
-    });
+    await onStep?.(message);
   } catch {
-    return false;
+    // Progress reporting must never break the actual task.
   }
 }
 
-/** Numbered list of visible, really-clickable elements, with live centre points. */
-async function collectElements(page: Page): Promise<BrowserElement[]> {
-  try {
-    const found = await page.evaluate(() => {
-      const selector =
-        'a[href],button,input:not([type=hidden]),textarea,select,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=checkbox],[role=switch],[role=combobox],[role=searchbox],[contenteditable=""],[contenteditable="true"],[onclick],[tabindex]:not([tabindex="-1"])';
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      const out: { tag: string; label: string; type?: string; x: number; y: number; w: number; h: number }[] = [];
-      const seen = new Set<Element>();
+function buildDeveloperPrompt(
+  task: string,
+  history: ChatMessage[],
+  existingFiles: string,
+  skills: string,
+): string {
+  const recentContext = history
+    .slice(-10)
+    .map((message) => {
+      const content = String(
+        message.content ?? "",
+      ).slice(0, 2500);
 
-      for (const el of Array.from(document.querySelectorAll(selector))) {
-        if (out.length >= 70) break;
-        const r = el.getBoundingClientRect();
-        if (r.width < 4 || r.height < 4) continue;
-        if (r.bottom < 0 || r.right < 0 || r.top > vh || r.left > vw) continue;
-        const cs = getComputedStyle(el);
-        if (cs.visibility === "hidden" || cs.display === "none" || Number(cs.opacity) === 0) continue;
+      return `${message.role}: ${content}`;
+    })
+    .join("\n");
 
-        const cx = Math.min(Math.max(r.left + r.width / 2, 1), vw - 1);
-        const cy = Math.min(Math.max(r.top + r.height / 2, 1), vh - 1);
-        const top = document.elementFromPoint(cx, cy);
-        if (!top || !(el === top || el.contains(top) || top.contains(el))) continue; // covered by something else
+  return `${AGENT_CORE}
 
-        // skip wrappers that duplicate an already-listed parent of the same size
-        let parent = el.parentElement;
-        let duplicate = false;
-        while (parent) {
-          if (seen.has(parent)) {
-            const pr = parent.getBoundingClientRect();
-            if (Math.abs(pr.width - r.width) < 8 && Math.abs(pr.height - r.height) < 8) duplicate = true;
-            break;
-          }
-          parent = parent.parentElement;
-        }
-        if (duplicate) continue;
-        seen.add(el);
+You are the Developer Agent running inside a persistent real cloud workspace.
 
-        const html = el as HTMLElement;
-        const input = el as HTMLInputElement;
-        const idOrClass = el.id || (typeof html.className === "string" ? html.className.split(" ")[0] : "");
-        const label = (
-          el.getAttribute("aria-label") ||
-          html.innerText ||
-          el.getAttribute("placeholder") ||
-          el.getAttribute("title") ||
-          input.value ||
-          el.getAttribute("alt") ||
-          el.querySelector("img")?.getAttribute("alt") ||
-          el.querySelector("svg title")?.textContent ||
-          el.getAttribute("name") ||
-          (idOrClass ? `icon:${idOrClass}` : "icon")
-        )
-          .replace(/\s+/g, " ")
-          .trim()
-          .slice(0, 70);
+Your job is to ACTUALLY build the user's project.
 
-        out.push({
-          tag: el.tagName.toLowerCase(),
-          label,
-          type: el.tagName === "INPUT" ? input.type : undefined,
-          x: Math.round(cx),
-          y: Math.round(cy),
-          w: Math.round(r.width),
-          h: Math.round(r.height),
-        });
+Do not merely explain how to do the task.
+You must generate the complete files required to implement the task.
+
+${DEV_CRAFT_GUIDE}
+
+${skills ? `\nAVAILABLE SKILLS:\n${skills}\n` : ""}
+
+USER TASK:
+${task}
+
+RECENT CONVERSATION:
+${recentContext || "(none)"}
+
+CURRENT PROJECT FILES:
+${existingFiles || "(empty project)"}
+
+STRICT IMPLEMENTATION RULES:
+
+1. Return complete files.
+2. Never return partial snippets.
+3. Never use placeholders such as:
+   - TODO
+   - implement here
+   - rest of code
+   - unchanged code
+4. Preserve existing functionality unless the user explicitly asks to remove it.
+5. Fix TypeScript errors caused by your changes.
+6. Keep imports valid.
+7. Use relative workspace paths.
+8. Do not use absolute filesystem paths.
+9. If package.json needs changing, return the COMPLETE package.json.
+10. If an existing file needs changing, return the COMPLETE file.
+11. Do not invent APIs that do not exist in the project.
+12. Prefer the project's existing utilities and architecture.
+13. The final result must be runnable.
+
+FILE FORMAT:
+
+FILE: path/to/file.ext
+\`\`\`language
+COMPLETE FILE CONTENT
+\`\`\`
+
+Return ONLY the files that need to be created or changed.
+`;
+}
+
+function extractGeneratedFiles(
+  responseText: string,
+): GeneratedFile[] {
+  const extracted = extractCodeFiles([
+    {
+      role: "assistant",
+      content: responseText || "",
+    },
+  ]);
+
+  return extracted
+    .filter((file) => {
+      if (!file?.filename) return false;
+
+      if (
+        file.filename.startsWith("snippet-")
+      ) {
+        return false;
       }
-      return out;
-    });
-    return found.map((e, i) => ({ index: i + 1, ...e }));
+
+      return typeof file.code === "string";
+    })
+    .map((file) => ({
+      id: file.id,
+      filename: file.filename,
+      language: file.language,
+      code: file.code,
+    }));
+}
+
+async function getExistingFiles(
+  uid: string,
+  scope: string,
+): Promise<ExistingWorkspaceFile[]> {
+  try {
+    const result = await workspaceListFiles(
+      uid,
+      true,
+      scope,
+    );
+
+    if (!Array.isArray(result.files)) {
+      return [];
+    }
+
+    return result.files.map((file) => ({
+      path: file.path,
+      content:
+        "content" in file &&
+        typeof file.content === "string"
+          ? file.content
+          : undefined,
+    }));
   } catch {
     return [];
   }
 }
 
-async function pressCombo(page: Page, combo: string) {
-  const parts = combo.split("+").map((p) => p.trim()).filter(Boolean);
-  if (parts.length <= 1) {
-    await page.keyboard.press((parts[0] || combo) as any);
-    return;
-  }
-  const key = parts[parts.length - 1];
-  const mods = parts.slice(0, -1);
-  for (const m of mods) await page.keyboard.down(m as any);
-  await page.keyboard.press((key.length === 1 ? `Key${key.toUpperCase()}` : key) as any);
-  for (const m of mods.reverse()) await page.keyboard.up(m as any);
-}
+function formatExistingFiles(
+  files: ExistingWorkspaceFile[],
+): string {
+  const MAX_FILES = 60;
+  const MAX_FILE_CHARS = 8000;
+  const MAX_TOTAL_CHARS = 60000;
 
-function searchUrl(query: string, engine: SearchEngine = "duckduckgo"): string {
-  const q = encodeURIComponent(query);
-  if (engine === "google") return `https://www.google.com/search?q=${q}`;
-  if (engine === "bing") return `https://www.bing.com/search?q=${q}`;
-  return `https://duckduckgo.com/?q=${q}&ia=web`;
-}
+  let total = 0;
 
-export async function startBrowserSession(
-  uid: string,
-  apiKey: string,
-  profileName?: string
-): Promise<{ sessionId: string; liveUrl: string; profileName?: string }> {
-  const profile = profileName ? `&profile=${encodeURIComponent(profileName)}` : "";
-  const browser = await puppeteer.connect({ browserWSEndpoint: connectionUrl(apiKey, profile) });
-  await activePage(browser);
+  const output: string[] = [];
 
-  const reconnectEndpoint = await refreshReconnectEndpoint(browser, apiKey);
-  const sessionId = crypto.randomUUID();
-  await saveSession(uid, sessionId, reconnectEndpoint);
-
-  let liveUrl = "";
-  try {
-    const page = (await browser.pages())[0] || (await browser.newPage());
-    const cdp = await page.createCDPSession();
-    const live = (await cdp.send("Browserless.liveURL" as any, {
-      timeout: REQUESTED_SESSION_MS,
-      interactable: true,
-      resizable: true,
-      showBrowserInterface: true,
-      quality: 70,
-      type: "jpeg",
-    } as any)) as { error?: string; liveURL?: string };
-    if (!live.error) liveUrl = live.liveURL || "";
-  } catch {
-    // Live view is best-effort; the agent can still automate the browser.
-  }
-
-  await browser.disconnect();
-  return { sessionId, liveUrl, profileName };
-}
-
-export async function runBrowserAction(
-  uid: string,
-  sessionId: string,
-  action: BrowserAction,
-  apiKey: string
-): Promise<BrowserActionResult> {
-  const reconnectEndpoint = await loadReconnectEndpoint(uid, sessionId);
-  const browser: Browser = await puppeteer.connect({ browserWSEndpoint: reconnectEndpoint });
-  try {
-    const page = await activePage(browser);
-    let extracted: string | undefined;
-
-    switch (action.type) {
-      case "goto": {
-        const url = /^https?:\/\//i.test(action.url) ? action.url : `https://${action.url}`;
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
-        await settle(page);
-        break;
-      }
-      case "search": {
-        await page
-          .goto(searchUrl(action.query, action.engine), { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS })
-          .catch(() => undefined);
-        await settle(page, 800);
-        break;
-      }
-      case "back":
-        await page.goBack({ waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS }).catch(() => undefined);
-        await settle(page);
-        break;
-      case "click": {
-        await page.mouse.move(action.x, action.y);
-        await sleep(80);
-        await page.mouse.click(action.x, action.y, {
-          button: action.button || "left",
-          clickCount: action.double ? 2 : 1,
-        });
-        await settle(page, 400);
-        break;
-      }
-      case "type": {
-        if (action.clear) {
-          await page.keyboard.down("Control");
-          await page.keyboard.press("KeyA");
-          await page.keyboard.up("Control");
-          await page.keyboard.press("Backspace");
-        }
-        await page.keyboard.type(action.text, { delay: 12 });
-        if (action.submit) {
-          await page.keyboard.press("Enter");
-          await settle(page, 600);
-        } else {
-          await sleep(300);
-        }
-        break;
-      }
-      case "key":
-        await pressCombo(page, action.key);
-        await settle(page, 300);
-        break;
-      case "scroll": {
-        await page.mouse.move(BROWSER_VIEWPORT.width / 2, BROWSER_VIEWPORT.height / 2);
-        await page.mouse.wheel({ deltaY: action.amount });
-        await sleep(450);
-        break;
-      }
-      case "extractText":
-        extracted = (await page.evaluate(() => document.body?.innerText || "")).replace(/\n{3,}/g, "\n\n").slice(0, 9000);
-        break;
-      case "wait":
-        // Captchas can take Browserless's auto-solver 15-30s — allow a longer wait than before.
-        await sleep(Math.min(action.ms, 30000));
-        break;
-      case "screenshot":
-        break;
+  for (
+    const file of files.slice(0, MAX_FILES)
+  ) {
+    if (total >= MAX_TOTAL_CHARS) {
+      break;
     }
 
-    const captchaLikely = await detectCaptcha(page);
-    const shot = (await page.screenshot({
-      encoding: "base64",
-      type: "jpeg",
-      quality: 70,
-      captureBeyondViewport: false,
-    })) as string;
-    const elements = await collectElements(page);
-    const viewport = page.viewport() || BROWSER_VIEWPORT;
+    const content =
+      typeof file.content === "string"
+        ? file.content.slice(
+            0,
+            MAX_FILE_CHARS,
+          )
+        : "(content unavailable)";
 
-    // Renew the session's timeout on every real action.
-    const fresh = await refreshReconnectEndpoint(browser, apiKey);
-    await saveSession(uid, sessionId, fresh);
+    total += content.length;
 
-    return {
-      screenshotBase64: shot,
-      text: extracted,
-      elements,
-      url: page.url(),
-      title: await page.title().catch(() => ""),
-      width: viewport.width,
-      height: viewport.height,
-      captchaLikely,
-    };
-  } finally {
-    await browser.disconnect();
+    output.push(
+      `FILE: ${file.path}\n\`\`\`\n${content}\n\`\`\``,
+    );
+  }
+
+  return output.join("\n\n");
+}
+
+async function writeGeneratedFiles(
+  uid: string,
+  scope: string,
+  files: GeneratedFile[],
+  changedFiles: string[],
+  onStep?: (
+    step: string,
+  ) => Promise<void> | void,
+  steps?: string[],
+) {
+  for (const file of files) {
+    const path = cleanPath(file.filename);
+
+    if (!path) {
+      continue;
+    }
+
+    if (!file.code.trim()) {
+      continue;
+    }
+
+    /*
+     * IMPORTANT:
+     *
+     * CodeFile uses:
+     *   code
+     *
+     * NOT:
+     *   content
+     */
+    await workspaceWriteFile(
+      uid,
+      path,
+      file.code,
+      scope,
+    );
+
+    if (!changedFiles.includes(path)) {
+      changedFiles.push(path);
+    }
+
+    if (steps) {
+      await notifyStep(
+        steps,
+        `Updated ${path}`,
+        onStep,
+      );
+    }
   }
 }
 
-export async function stopBrowserSession(uid: string, sessionId: string): Promise<void> {
-  try {
-    const reconnectEndpoint = await loadReconnectEndpoint(uid, sessionId);
-    const browser = await puppeteer.connect({ browserWSEndpoint: reconnectEndpoint });
-    await browser.close();
-  } catch {
-    // best-effort
-  } finally {
-    await adminDb().collection("users").doc(uid).collection("browserSessions").doc(sessionId).delete().catch(() => null);
+function projectHasFile(
+  files: ExistingWorkspaceFile[],
+  changedFiles: string[],
+  filename: string,
+) {
+  return (
+    changedFiles.includes(filename) ||
+    files.some(
+      (file) => file.path === filename,
+    )
+  );
+}
+
+function getPackageJson(
+  existingFiles: ExistingWorkspaceFile[],
+  generatedFiles: GeneratedFile[],
+): string {
+  const generated = generatedFiles.find(
+    (file) =>
+      cleanPath(file.filename) ===
+      "package.json",
+  );
+
+  if (generated?.code) {
+    return generated.code;
   }
+
+  const existing = existingFiles.find(
+    (file) =>
+      file.path === "package.json",
+  );
+
+  return existing?.content || "";
+}
+
+function hasPackageScript(
+  packageJson: string,
+  script: string,
+): boolean {
+  if (!packageJson) return false;
+
+  try {
+    const parsed = JSON.parse(
+      packageJson,
+    );
+
+    return Boolean(
+      parsed?.scripts &&
+        typeof parsed.scripts[script] ===
+          "string",
+    );
+  } catch {
+    return false;
+  }
+}
+
+function detectProject(
+  packageJson: string,
+) {
+  let parsed: any = {};
+
+  try {
+    parsed = JSON.parse(
+      packageJson || "{}",
+    );
+  } catch {
+    parsed = {};
+  }
+
+  const dependencies = {
+    ...(parsed.dependencies || {}),
+    ...(parsed.devDependencies || {}),
+  };
+
+  return {
+    hasPackage:
+      Boolean(packageJson.trim()),
+
+    hasNext:
+      Boolean(dependencies.next),
+
+    hasVite:
+      Boolean(dependencies.vite),
+
+    hasDev:
+      Boolean(
+        parsed.scripts?.dev,
+      ),
+
+    hasStart:
+      Boolean(
+        parsed.scripts?.start,
+      ),
+
+    hasBuild:
+      Boolean(
+        parsed.scripts?.build,
+      ),
+  };
+}
+
+async function runBuild(
+  uid: string,
+  scope: string,
+): Promise<{
+  ok: boolean;
+  output: string;
+}> {
+  const result = await workspaceExec(
+    uid,
+    "npm run build",
+    scope,
+    300,
+  );
+
+  /*
+   * workspaceExec() returns:
+   *   output
+   *
+   * NOT stdout/stderr.
+   */
+  return {
+    ok: result.exitCode === 0,
+    output: result.output || "",
+  };
+}
+
+async function installDependencies(
+  uid: string,
+  scope: string,
+): Promise<{
+  ok: boolean;
+  output: string;
+}> {
+  const result = await workspaceExec(
+    uid,
+    "npm install --no-audit --no-fund",
+    scope,
+    300,
+  );
+
+  return {
+    ok: result.exitCode === 0,
+    output: result.output || "",
+  };
+}
+
+async function hasNodeModules(
+  uid: string,
+  scope: string,
+): Promise<boolean> {
+  try {
+    const result = await workspaceExec(
+      uid,
+      "test -d node_modules && echo yes || echo no",
+      scope,
+      20,
+    );
+
+    return (
+      result.exitCode === 0 &&
+      result.output.includes("yes")
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function waitForListeningPort(
+  uid: string,
+  preferredPort: number,
+  previousPorts: number[],
+  attempts = 25,
+): Promise<number | null> {
+  const previous = new Set(
+    previousPorts,
+  );
+
+  for (
+    let attempt = 0;
+    attempt < attempts;
+    attempt++
+  ) {
+    try {
+      const result =
+        await workspaceListeningPorts(
+          uid,
+        );
+
+      const ports = Array.isArray(
+        result.ports,
+      )
+        ? result.ports
+        : [];
+
+      if (
+        ports.includes(
+          preferredPort,
+        )
+      ) {
+        return preferredPort;
+      }
+
+      const newlyOpened = ports.find(
+        (port) =>
+          !previous.has(port) &&
+          port >= 3000 &&
+          port <= 9999,
+      );
+
+      if (newlyOpened) {
+        return newlyOpened;
+      }
+    } catch {
+      // Keep waiting.
+    }
+
+    await sleep(1000);
+  }
+
+  return null;
+}
+
+async function startLivePreview(
+  uid: string,
+  scope: string,
+  packageJson: string,
+  hasHtml: boolean,
+): Promise<{
+  url?: string;
+  port?: number;
+  message?: string;
+}> {
+  const project = detectProject(
+    packageJson,
+  );
+
+  let preferredPort: number;
+
+  try {
+    preferredPort = portForScope(
+      scope,
+      project.hasVite,
+    );
+  } catch {
+    preferredPort = 3000;
+  }
+
+  const beforeResult =
+    await workspaceListeningPorts(
+      uid,
+    ).catch(() => ({
+      ports: [] as number[],
+    }));
+
+  const beforePorts =
+    Array.isArray(
+      beforeResult.ports,
+    )
+      ? beforeResult.ports
+      : [];
+
+  await workspaceFreePort(
+    uid,
+    preferredPort,
+  ).catch(() => undefined);
+
+  let command = "";
+
+  if (
+    project.hasPackage &&
+    project.hasDev
+  ) {
+    if (project.hasVite) {
+      command =
+        `HOST=0.0.0.0 npm run dev -- --host 0.0.0.0 --port ${preferredPort}`;
+    } else if (project.hasNext) {
+      command =
+        `HOSTNAME=0.0.0.0 npm run dev -- --hostname 0.0.0.0 --port ${preferredPort}`;
+    } else {
+      command =
+        `HOST=0.0.0.0 PORT=${preferredPort} npm run dev`;
+    }
+  } else if (
+    project.hasPackage &&
+    project.hasStart
+  ) {
+    if (project.hasNext) {
+      command =
+        `HOSTNAME=0.0.0.0 npm run start -- --hostname 0.0.0.0 --port ${preferredPort}`;
+    } else {
+      command =
+        `HOST=0.0.0.0 PORT=${preferredPort} npm run start`;
+    }
+  } else if (hasHtml) {
+    command =
+      `python3 -m http.server ${preferredPort} --bind 0.0.0.0`;
+  } else {
+    return {
+      message:
+        "No supported development/start script was found.",
+    };
+  }
+
+  const sessionId =
+    `developer-${scope
+      .replace(/[^a-zA-Z0-9_-]/g, "-")
+      .slice(0, 70)}`;
+
+  await workspaceSessionExec(
+    uid,
+    sessionId,
+    command,
+    scope,
+    true,
+  );
+
+  const livePort =
+    await waitForListeningPort(
+      uid,
+      preferredPort,
+      beforePorts,
+    );
+
+  if (!livePort) {
+    return {
+      message:
+        "Development server started, but no listening preview port was detected.",
+    };
+  }
+
+  try {
+    const preview =
+      await workspacePreview(
+        uid,
+        livePort,
+      );
+
+    return {
+      url: preview.url,
+      port: livePort,
+    };
+  } catch {
+    return {
+      port: livePort,
+      message:
+        "Preview server is running, but a preview URL could not be generated.",
+    };
+  }
+}
+
+export async function runServerDeveloperWorkspace(
+  uid: string,
+  providerId: string,
+  apiKey: string,
+  task: string,
+  model: string | undefined,
+  history: ChatMessage[],
+  scope: string,
+  installedSkills = "",
+  onStep?: (
+    step: string,
+  ) => Promise<void> | void,
+): Promise<ServerDeveloperResult> {
+  const steps: string[] = [];
+  const changedFiles: string[] = [];
+
+  // ---------------------------------------------------------
+  // 1. PERSISTENT WORKSPACE
+  // ---------------------------------------------------------
+
+  const workspace =
+    await ensureWorkspace(uid);
+
+  await notifyStep(
+    steps,
+    `Persistent workspace ready: ${workspace.sandboxId.slice(
+      0,
+      12,
+    )}…`,
+    onStep,
+  );
+
+  // ---------------------------------------------------------
+  // 2. READ CURRENT PROJECT
+  // ---------------------------------------------------------
+
+  const existingFiles =
+    await getExistingFiles(
+      uid,
+      scope,
+    );
+
+  const existingText =
+    formatExistingFiles(
+      existingFiles,
+    );
+
+  await notifyStep(
+    steps,
+    `Inspected ${existingFiles.length} workspace files.`,
+    onStep,
+  );
+
+  // ---------------------------------------------------------
+  // 3. ASK DEVELOPER MODEL TO IMPLEMENT TASK
+  // ---------------------------------------------------------
+
+  await notifyStep(
+    steps,
+    "Analyzing the project and generating implementation…",
+    onStep,
+  );
+
+  let response =
+    await sendChatMessage({
+      providerId,
+      apiKey,
+      model,
+      messages: [
+        {
+          role: "user",
+          content:
+            buildDeveloperPrompt(
+              task,
+              history,
+              existingText,
+              installedSkills,
+            ),
+        },
+      ],
+    });
+
+  let generatedFiles =
+    extractGeneratedFiles(
+      response.text || "",
+    );
+
+  if (!generatedFiles.length) {
+    throw new Error(
+      "Developer Agent returned no valid files.",
+    );
+  }
+
+  // ---------------------------------------------------------
+  // 4. WRITE FILES
+  // ---------------------------------------------------------
+
+  await writeGeneratedFiles(
+    uid,
+    scope,
+    generatedFiles,
+    changedFiles,
+    onStep,
+    steps,
+  );
+
+  // ---------------------------------------------------------
+  // 5. DETECT PROJECT
+  // ---------------------------------------------------------
+
+  let packageJson =
+    getPackageJson(
+      existingFiles,
+      generatedFiles,
+    );
+
+  const project =
+    detectProject(
+      packageJson,
+    );
+
+  const hasHtml =
+    generatedFiles.some(
+      (file) =>
+        cleanPath(file.filename)
+          ?.toLowerCase()
+          .endsWith(".html"),
+    ) ||
+    existingFiles.some(
+      (file) =>
+        file.path
+          .toLowerCase()
+          .endsWith(".html"),
+    );
+
+  // ---------------------------------------------------------
+  // 6. INSTALL DEPENDENCIES
+  // ---------------------------------------------------------
+
+  let buildOutput = "";
+  let buildOk = true;
+
+  if (project.hasPackage) {
+    const packageChanged =
+      changedFiles.includes(
+        "package.json",
+      );
+
+    const modulesExist =
+      await hasNodeModules(
+        uid,
+        scope,
+      );
+
+    if (
+      packageChanged ||
+      !modulesExist
+    ) {
+      await notifyStep(
+        steps,
+        "Installing project dependencies…",
+        onStep,
+      );
+
+      const install =
+        await installDependencies(
+          uid,
+          scope,
+        );
+
+      buildOutput =
+        install.output;
+
+      if (!install.ok) {
+        buildOk = false;
+
+        await notifyStep(
+          steps,
+          "Dependency installation failed.",
+          onStep,
+        );
+      } else {
+        await notifyStep(
+          steps,
+          "Dependencies installed successfully.",
+          onStep,
+        );
+      }
+    }
+  }
+
+  // ---------------------------------------------------------
+  // 7. BUILD
+  // ---------------------------------------------------------
+
+  if (
+    buildOk &&
+    project.hasPackage &&
+    project.hasBuild
+  ) {
+    await notifyStep(
+      steps,
+      "Running production build…",
+      onStep,
+    );
+
+    let build =
+      await runBuild(
+        uid,
+        scope,
+      );
+
+    buildOutput =
+      build.output;
+
+    // -------------------------------------------------------
+    // 8. AUTOMATIC SELF-REPAIR
+    // -------------------------------------------------------
+
+    for (
+      let attempt = 1;
+      attempt <= 2 &&
+      !build.ok;
+      attempt++
+    ) {
+      await notifyStep(
+        steps,
+        `Build failed — automatic repair ${attempt}/2…`,
+        onStep,
+      );
+
+      const repairPrompt = `You are repairing the user's REAL project.
+
+USER TASK:
+${task}
+
+BUILD ERROR:
+${build.output.slice(-18000)}
+
+FILES THAT WERE CHANGED:
+${changedFiles.join("\n")}
+
+CURRENT PROJECT FILES:
+${existingText}
+
+Fix the build.
+
+Return ONLY COMPLETE files using this format:
+
+FILE: path/to/file.ext
+\`\`\`language
+COMPLETE FILE CONTENT
+\`\`\`
+
+Do not return explanations.
+Do not return snippets.
+Do not use placeholders.
+Do not change unrelated files unless required for the fix.`;
+
+      response =
+        await sendChatMessage({
+          providerId,
+          apiKey,
+          model,
+          messages: [
+            {
+              role: "user",
+              content:
+                repairPrompt,
+            },
+          ],
+        });
+
+      const repairedFiles =
+        extractGeneratedFiles(
+          response.text || "",
+        );
+
+      if (!repairedFiles.length) {
+        await notifyStep(
+          steps,
+          "Repair agent returned no valid files.",
+          onStep,
+        );
+
+        break;
+      }
+
+      await writeGeneratedFiles(
+        uid,
+        scope,
+        repairedFiles,
+        changedFiles,
+        onStep,
+        steps,
+      );
+
+      packageJson =
+        getPackageJson(
+          existingFiles,
+          repairedFiles,
+        );
+
+      build =
+        await runBuild(
+          uid,
+          scope,
+        );
+
+      buildOutput =
+        build.output;
+    }
+
+    buildOk = build.ok;
+
+    if (buildOk) {
+      await notifyStep(
+        steps,
+        "Production build passed successfully.",
+        onStep,
+      );
+    } else {
+      await notifyStep(
+        steps,
+        "Production build is still failing after automatic repair.",
+        onStep,
+      );
+    }
+  }
+
+  // ---------------------------------------------------------
+  // 9. LIVE PROJECT PREVIEW
+  // ---------------------------------------------------------
+
+  let previewUrl:
+    | string
+    | undefined;
+
+  let previewPort:
+    | number
+    | undefined;
+
+  if (
+    buildOk &&
+    (
+      project.hasPackage ||
+      hasHtml
+    )
+  ) {
+    await notifyStep(
+      steps,
+      "Starting live project preview…",
+      onStep,
+    );
+
+    const preview =
+      await startLivePreview(
+        uid,
+        scope,
+        packageJson,
+        hasHtml,
+      );
+
+    previewUrl =
+      preview.url;
+
+    previewPort =
+      preview.port;
+
+    if (previewUrl) {
+      await notifyStep(
+        steps,
+        `Live preview ready: ${previewUrl}`,
+        onStep,
+      );
+    } else if (
+      preview.message
+    ) {
+      await notifyStep(
+        steps,
+        preview.message,
+        onStep,
+      );
+    }
+  }
+
+  // ---------------------------------------------------------
+  // 10. FINAL RESULT
+  // ---------------------------------------------------------
+
+  return {
+    changedFiles,
+    buildOutput,
+    buildOk,
+    previewUrl,
+    previewPort,
+    steps,
+  };
 }
