@@ -1,12 +1,14 @@
 "use client";
 
 // components/MCPPanel.tsx
-// Adding a server here now works like Claude.ai: type the URL, and
-// AgenticVenus checks what auth it needs. If it supports OAuth, a
-// "Continue to X" button appears — click it, log in on that service, and
-// you're connected, no key to find or paste. If it just needs a static
-// API key, the field for that appears instead. If it needs nothing, it
-// connects immediately.
+// Adding a server here works like Claude.ai: type the URL, and AgenticVenus
+// checks what auth it needs. If it supports OAuth, a "Continue to X" button
+// appears — click it, log in on that service, and you're connected, no key
+// to find or paste. If it just needs a static API key, the field for that
+// appears instead. If it needs nothing, it connects immediately.
+//
+// `embedded`: when true, renders WITHOUT its own SlideOverPanel wrapper so
+// it can live inside ConnectorsPanel's "MCP" tab.
 
 import { useEffect, useState } from "react";
 import SlideOverPanel from "@/components/SlideOverPanel";
@@ -18,9 +20,10 @@ type Props = {
   open: boolean;
   onClose: () => void;
   prefill?: { name: string; url: string } | null;
+  embedded?: boolean;
 };
 
-export default function MCPPanel({ uid, open, onClose, prefill }: Props) {
+export default function MCPPanel({ uid, open, onClose, prefill, embedded = false }: Props) {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -115,13 +118,8 @@ export default function MCPPanel({ uid, open, onClose, prefill }: Props) {
     await refresh();
   }
 
-  return (
-    <SlideOverPanel
-      open={open}
-      onClose={onClose}
-      title="MCP Tools"
-      subtitle="Connect a real MCP server so your agent can actually call its tools."
-    >
+  const body = (
+    <>
       <div className="space-y-3">
         <input
           value={name}
@@ -247,8 +245,26 @@ export default function MCPPanel({ uid, open, onClose, prefill }: Props) {
         can't be reached directly from AgenticVenus since it's a hosted
         web app — expose them through a public HTTPS URL (a tunnel like
         ngrok, or the tool's own remote-server mode) first, then connect
-        that URL here the same way.
+        that URL here the same way. You can also just tell the agent in
+        chat, e.g. "connect this MCP: https://..." — it fills this form in
+        and runs the same steps for you.
       </p>
+    </>
+  );
+
+  if (embedded) {
+    if (!open) return null;
+    return <div>{body}</div>;
+  }
+
+  return (
+    <SlideOverPanel
+      open={open}
+      onClose={onClose}
+      title="MCP Tools"
+      subtitle="Connect a real MCP server so your agent can actually call its tools."
+    >
+      {body}
     </SlideOverPanel>
   );
 }
